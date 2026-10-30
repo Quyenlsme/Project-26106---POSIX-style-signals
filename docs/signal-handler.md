@@ -1,84 +1,110 @@
-
-```markdown
 # ĐẶC TẢ THIẾT KẾ KỸ THUẬT: SIGNAL HANDLER & CONTEXT RESTORATION
 * **Module:** Signal Handler & Context Restoration (Phụ trách: Trần Việt Hưng)
 * **Đề tài:** POSIX-style signal (Mã dự án: 26106)
+* **Trạng thái:** Đã chuẩn hóa thiết kế, đồng bộ cùng module Delivery (Quyền) và Mask/Alarm (Kiên).
 
 ---
 
 ## 1. Mục tiêu module
-* Xây dựng cơ chế đăng ký trình xử lý tín hiệu thông qua system call `sigaction`.
-* Hiện thực hóa việc chuyển hướng luồng thực thi của tiến trình từ không gian người dùng (`user mode`) sang chạy `signal handler` khi có tín hiệu chưa bị chặn.
-* Thiết kế khung stack chuyên biệt (`sigframe`) trên `user stack` để lưu trữ toàn bộ ngữ cảnh tiến trình.
-* Hiện thực hóa system call `sigreturn` để khôi phục nguyên vẹn trạng thái thanh ghi và tiếp tục chu trình thực thi của chương trình.
-
-## 2. Các file liên quan
-* `kernel/trap.c`: Điểm kiểm tra tín hiệu và chuẩn bị trả về `user mode`.
-* `kernel/proc.h`: Cấu trúc tiến trình `struct proc` và bảng lưu trạng thái thanh ghi `struct trapframe`.
-* `kernel/trampoline.S`: Đoạn mã hợp ngữ xử lý việc lưu/khôi phục toàn bộ thanh ghi giữa `user mode` và `kernel mode`.
-* `kernel/syscall.c` & `kernel/syscall.h`: Quản lý bảng lời gọi hệ thống (`sys_sigaction`, `sys_sigreturn`).
+* Xây dựng cơ chế đăng ký và cấu hình hành vi tín hiệu thông qua system call `sigaction`.
+* Hiện thực hóa chuyển hướng luồng thực thi từ user mode sang chạy `signal handler` khi có tín hiệu đủ điều kiện delivery.
+* Thiết kế khung stack chuyên biệt (`sigframe`) trên `user stack` theo chuẩn RISC-V ABI (16-byte alignment, tham số qua thanh ghi `a0`, địa chỉ trở về qua `ra`).
+* Hiện thực hóa system call `sigreturn` để khôi phục nguyên vẹn 100% ngữ cảnh thanh ghi và signal mask của tiến trình.
+* Hỗ trợ cơ chế Nested Handlers (tín hiệu lồng nhau) hoạt động theo nguyên tắc LIFO.
 
 ---
 
-## 3. Phân tích `trapframe` và Lý do vì sao khôi phục mỗi `PC` (Program Counter) là không đủ?
-
-### a. Phân tích `struct trapframe` (`kernel/proc.h`)
-Khi một tiến trình đang chạy ở user mode bị ngắt (do ecall, timer, hay ngoại lệ), phần cứng RISC-V lưu con trỏ lệnh hiện tại vào thanh ghi `sepc` và chuyển quyền điều khiển vào kernel thông qua `trampoline.S`. Đoạn mã hợp ngữ này sẽ cất giữ **toàn bộ 32 thanh ghi phần cứng** của tiến trình vào cấu trúc `struct trapframe`, bao gồm:
-* Thanh ghi con trỏ lệnh (`epc` / `sepc`).
-* Thanh ghi ngăn xếp (`sp` - x2).
-* Các thanh ghi giá trị trả về và tham số (`a0` đến `a7` - x10 đến x17).
-* Các thanh ghi lưu trữ tạm thời (`t0` đến `t6`) và các thanh ghi được bảo toàn bởi hàm (`s0` đến `s11`).
-
-### b. Giải thích vì sao khôi phục mỗi Program Counter (`PC` / `epc`) là không đủ?
-Nhiều người lầm tưởng rằng khi tín hiệu đến, kernel chỉ cần lưu lại địa chỉ lệnh hiện tại (`PC`), nhảy đi chạy hàm handler, rồi gán lại `PC` cũ để chạy tiếp là xong. **Điều này hoàn toàn sai lầm và sẽ làm hỏng chương trình ngay lập tức vì các lý do sau:**
-1. **Xung đột giá trị thanh ghi (Register Clobbering):** Hàm `signal handler` là một hàm viết bằng C do người dùng định nghĩa. Khi hàm này chạy, nó sẽ tùy ý sử dụng các thanh ghi chung (như `t0-t6`, `a0-a7`, `s0-s11`) để tính toán. Nếu kernel không lưu lại trạng thái các thanh ghi này trước khi gọi handler, toàn bộ dữ liệu đang tính toán dở dang trong các thanh ghi của chương trình chính sẽ bị **ghi đè và xóa sạch vĩnh viễn**.
-2. **Hỏng con trỏ ngăn xếp (`Stack Pointer - SP`):** Hàm handler cần không gian trên stack để cấp phát biến cục bộ và gọi hàm con. Nếu không chuyển hướng hoặc lưu trữ `sp`, handler có thể ghi đè lên dữ liệu của chương trình chính.
-3. **Trạng thái hàm bị gián đoạn:** Một tiến trình không chỉ đơn thuần là `PC`. Nó là tập hợp của toàn bộ ngữ cảnh phần cứng tại thời điểm bị ngắt. Do đó, **bắt buộc phải bảo toàn toàn bộ 32 thanh ghi** thông qua một khung stack chuyên biệt (`sigframe`) chứ không thể chỉ lưu mỗi `PC`.
+## 2. Các file liên quan & Tương tác Kernel
+* `kernel/signal.h`: Định nghĩa các hằng số tín hiệu, `NSIG`, `sigset_t`, `struct sigaction`, `struct sigframe`.
+* `kernel/proc.h`: Mở rộng `struct proc` chứa bảng action và các trường signal mask/pending.
+* `kernel/trap.c`: Điểm gọi `sig_setup_frame()` trong `prepare_return()` trước khi quay về user mode.
+* `kernel/syscall.c` & `kernel/syscall.h`: Khai báo và dispatch `SYS_sigaction` (23), `SYS_sigreturn` (24); xử lý ngoại lệ không ghi đè `a0` khi `sigreturn`.
+* `kernel/sysproc.c`: Hiện thực hàm `sys_sigaction()` và `sys_sigreturn()`.
+* `user/user.h` & `user/usys.pl`: Khai báo wrapper và system call stubs phía user space.
 
 ---
 
-## 4. Thiết kế lưu Handler và Signal Action
-Trong cấu trúc quản lý tiến trình `struct proc`, ta bổ sung mảng quản lý hành động:
+## 3. Phân tích Trapframe và Yêu cầu khôi phục ngữ cảnh trên RISC-V
+
+### a. Cấu trúc `struct trapframe` (`kernel/proc.h`)
+Khi tiến trình user bị ngắt (do trap, interrupt hoặc syscall), mã hợp ngữ `trampoline.S` lưu toàn bộ trạng thái phần cứng vào `struct trapframe`, bao gồm:
+* `epc`: Program Counter tại thời điểm bị ngắt.
+* `sp`: Stack Pointer (x2) của user space.
+* `ra`: Return Address (x1).
+* `a0 - a7`: Thanh ghi tham số và giá trị trả về (x10 - x17).
+* `t0 - t6`: Thanh ghi tạm thời (temporary registers).
+* `s0 - s11`: Thanh ghi được bảo toàn bởi hàm (callee-saved registers).
+
+### b. Vì sao chỉ khôi phục Program Counter (`epc`) là KHÔNG ĐỦ?
+1. **Xung đột giá trị thanh ghi (Register Clobbering):** Hàm `signal handler` là hàm C bình thường. Khi chạy, compiler sẽ phát sinh mã sử dụng các thanh ghi tính toán (`t0-t6`, `a0-a7`,...). Nếu không sao lưu toàn bộ trapframe trước khi chuyển sang handler, toàn bộ dữ liệu đang tính dở của chương trình chính sẽ bị ghi đè và hỏng dữ liệu ngay lập tức.
+2. **Nguy cơ hỏng User Stack:** Handler cần stack để cấp phát biến cục bộ và gọi hàm con. Nếu không hạ `sp` để cấp phát khung `sigframe`, handler sẽ ghi đè lên các khung hàm đang hoạt động của chương trình chính.
+3. **Phục hồi nguyên vẹn trạng thái gián đoạn:** Để chương trình chính tiếp tục chạy thông suốt sau khi handler kết thúc, toàn bộ 32 thanh ghi phần cứng cùng mặt nạ tín hiệu (`sigset_t`) trước thời điểm nhận tín hiệu phải được khôi phục nguyên vẹn.
+
+---
+
+## 4. Cấu trúc Dữ liệu & Hằng số dùng chung 
+
+Thống nhất sử dụng chung các định nghĩa trong `kernel/signal.h`:
+
 ```c
-struct sigaction sig_actions[MAXSIG];
+#define NSIG 32               // Hỗ trợ tối đa 32 signals (tương ứng bitmask 32-bit)
 
-```
+typedef uint32 sigset_t;      // Mặt nạ tín hiệu 32-bit (bit 1..31, bit 0 không dùng)
 
-Với cấu trúc `struct sigaction`:
+#define SIG_DFL ((void (*)(int))0)   // Xử lý mặc định
+#define SIG_IGN ((void (*)(int))1)   // Bỏ qua tín hiệu
 
-```c
 struct sigaction {
-  void (*sa_handler)(int);     // Địa chỉ hàm xử lý tín hiệu ở user space
-  sigset_t sa_mask;            // Các tín hiệu bị chặn bổ sung khi handler đang chạy
-  int sa_flags;                // Cờ cấu hình (ví dụ: SA_RESTART)
+  void (*sa_handler)(int);     // Con trỏ hàm xử lý tín hiệu, SIG_DFL hoặc SIG_IGN
+  sigset_t sa_mask;            // Các tín hiệu bị chặn bổ sung khi handler này chạy
+  int sa_flags;                // Cờ cấu hình bổ sung (mặc định 0)
   void (*sa_restorer)(void);   // Con trỏ tới hàm gọi sigreturn sau khi handler kết thúc
 };
+```
 
+Trong `struct proc` (`kernel/proc.h`), bổ sung các trường đồng bộ:
+```c
+// Được bảo vệ bởi p->lock
+sigset_t pending_signals;            // Tín hiệu đang chờ (Quyền quản lý)
+sigset_t blocked_signals;            // Tín hiệu bị chặn (Kiên quản lý)
+struct sigaction sig_actions[NSIG];  // Bảng cấu hình hành vi của từng signal (Hưng quản lý)
 ```
 
 ---
 
-## 5. Sơ đồ Handler Frame trên User Stack (`sigframe`)
+## 5. Thiết kế Khung Stack Tín Hiệu (`struct sigframe`) & RISC-V Calling Convention
 
-Ngay trước khi kernel trả quyền về user mode để chạy handler, kernel sẽ cấp phát và đẩy cấu trúc `sigframe` lên đỉnh của **User Stack**:
+### a. Cấu trúc `struct sigframe`
+Khung stack tín hiệu được kernel ghi vào vùng nhớ user stack của tiến trình:
+
+```c
+struct sigframe {
+  struct trapframe saved_tf;   // Toàn bộ ngữ cảnh trapframe trước khi nhận signal
+  sigset_t saved_mask;         // Mặt nạ tín hiệu cũ của tiến trình
+  int signum;                  // Số hiệu tín hiệu được xử lý
+  uint64 ret_addr;             // Địa chỉ trở về (sa_restorer)
+};
+```
+
+### b. Sơ đồ User Stack khi kích hoạt Handler
 
 ```mermaid
 graph TD
     subgraph UserStack ["VÙNG NHỚ USER STACK (Địa chỉ ảo tăng dần từ dưới lên)"]
         direction BT
         
-        MainProg["Chương trình chính (Main Program) / Dữ liệu cũ"] --> OldSP["Con trỏ Stack cũ (sp trước khi nhận signal)"]
+        MainProg["Chương trình chính (Main Program) / Khung stack cũ"] --> OldSP["Con trỏ Stack cũ (sp trước khi nhận signal)"]
         
         subgraph SigFrame ["struct sigframe (Khung Stack Tín Hiệu)"]
             direction TB
-            SF1["int signum (Số hiệu tín hiệu)"]
-            SF2["uint64 ret_addr (Địa chỉ hàm restorer / trampoline)"]
-            SF3["struct trapframe saved_tf (Bảo toàn toàn bộ 32 thanh ghi: sepc, sp, ra, t0-t6, s0-s11...)"]
-            SF4["sigset_t saved_mask (Lưu lại mặt nạ tín hiệu cũ của tiến trình)"]
+            SF1["struct trapframe saved_tf (Bảo toàn 32 thanh ghi: epc, sp, ra, a0-a7, t0-t6, s0-s11...)"]
+            SF2["sigset_t saved_mask (Lưu lại mặt nạ tín hiệu cũ của tiến trình)"]
+            SF3["int signum (Số hiệu tín hiệu)"]
+            SF4["uint64 ret_addr (Địa chỉ sa_restorer)"]
         end
         
         OldSP --- SigFrame
-        SigFrame --> NewSP["Con trỏ Stack mới (sp đã trừ kích thước struct sigframe)"]
+        SigFrame --> NewSP["Con trỏ Stack mới (sp đã trừ sizeof(struct sigframe) & căn chỉnh 16 bytes)"]
         NewSP --> HandlerSpace["Không gian trống cho Signal Handler thực thi"]
     end
 
@@ -86,51 +112,114 @@ graph TD
     style SigFrame fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style MainProg fill:#fff,stroke:#666,stroke-width:1px
     style HandlerSpace fill:#e8f5e9,stroke:#388e3c,stroke-width:1px
+```
 
+### c. Quy tắc thiết lập thanh ghi phần cứng theo chuẩn RISC-V ABI
+Khi thiết lập chạy handler, kernel chuẩn bị các thanh ghi trong `p->trapframe` như sau:
+1. **Tham số hàm (`a0`):** Handler nhận đối số là số hiệu signal (`void handler(int sig)`). Do đó, kernel gán:
+   `p->trapframe->a0 = signum;`
+2. **Con trỏ lệnh (`epc`):** Đặt điểm nhảy vào mã nguồn của handler:
+   `p->trapframe->epc = (uint64)act->sa_handler;`
+3. **Thanh ghi liên kết (`ra`):** Khi hàm handler thực hiện lệnh `ret`, CPU sẽ nhảy đến địa chỉ trong `ra`. Kernel gán:
+   `p->trapframe->ra = (uint64)act->sa_restorer;`
+   *(Tại `sa_restorer`, chương trình user sẽ thực hiện ecall gọi `sigreturn()`)*.
+4. **Căn chỉnh Stack Pointer (`sp`):** Chuẩn RISC-V bắt buộc con trỏ stack phải căn chỉnh 16-byte:
+   `new_sp = (p->trapframe->sp - sizeof(struct sigframe)) & ~0xF;`
+   `p->trapframe->sp = new_sp;`
+
+---
+
+## 6. Giao tiếp giữa Delivery (Quyền) và Handler (Hưng)
+
+Trước khi quay lại user mode trong `prepare_return()`, module Delivery của Quyền chọn được signal hợp lệ sẽ gọi sang hàm dựng frame của Hưng:
+
+```c
+// Trả về 0 nếu thành công, -1 nếu thất bại (lỗi bộ nhớ, copyout thất bại)
+int sig_setup_frame(int sig, struct sigaction *act) {
+    struct proc *p = myproc();
+    struct sigframe sf;
+    
+    // 1. Tính toán địa chỉ stack mới và căn chỉnh 16-byte
+    uint64 new_sp = (p->trapframe->sp - sizeof(struct sigframe)) & ~0xF;
+    
+    // Kiểm tra giới hạn bộ nhớ user stack hợp lệ
+    if (new_sp >= p->sz || new_sp < p->trapframe->sp - PGSIZE)
+        return -1;
+        
+    // 2. Sao lưu ngữ cảnh cũ vào sigframe
+    sf.saved_tf = *(p->trapframe);
+    sf.saved_mask = p->blocked_signals;
+    sf.signum = sig;
+    sf.ret_addr = (uint64)act->sa_restorer;
+    
+    // 3. Đẩy sigframe lên user stack
+    if (copyout(p->pagetable, new_sp, (char*)&sf, sizeof(sf)) < 0)
+        return -1;
+        
+    // 4. Áp dụng mặt nạ tín hiệu mới khi vào handler (khớp thiết kế của Quyền & Kiên):
+    // Tự động chặn chính signal đang xử lý và các signal trong sa_mask
+    p->blocked_signals |= (act->sa_mask | (1U << sig));
+    p->blocked_signals &= ~UNBLOCKABLE_MASK; // Không được chặn SIGKILL
+    
+    // 5. Cập nhật trapframe để chuyển sang chạy handler
+    p->trapframe->sp = new_sp;
+    p->trapframe->epc = (uint64)act->sa_handler;
+    p->trapframe->ra = (uint64)act->sa_restorer;
+    p->trapframe->a0 = sig;
+    
+    return 0;
+}
 ```
 
 ---
 
-## 6. Pseudocode cho `sigreturn()`
+## 7. Hiện thực `sys_sigreturn()` & Xử lý bảo toàn thanh ghi `a0`
 
-Khi hàm handler ở user space thực thi xong, nó sẽ nhảy đến đoạn mã `sa_restorer` (hoặc trampoline phía user), từ đó gọi lời gọi hệ thống `sys_sigreturn()`. Thuật toán thực hiện trong kernel:
+### a. Pseudocode cho `sys_sigreturn()`
+Khi handler chạy xong và gọi `sigreturn()`, kernel tháo gỡ frame và phục hồi ngữ cảnh:
 
 ```c
 uint64 sys_sigreturn(void) {
     struct proc *p = myproc();
-    
-    // 1. Tính toán vị trí sigframe hiện tại trên user stack của tiến trình
-    uint64 frame_addr = p->trapframe->sp; 
-    
-    // 2. Đọc cấu trúc sigframe từ user stack xuống kernel qua copyin
     struct sigframe sf;
+    uint64 frame_addr = p->trapframe->sp;
+    
+    // 1. Đọc sigframe từ user stack vào kernel
     if (copyin(p->pagetable, (char*)&sf, frame_addr, sizeof(sf)) < 0)
         return -1;
         
-    // 3. Khôi phục lại toàn bộ trạng thái thanh ghi ban đầu vào trapframe của tiến trình
+    // 2. Phục hồi nguyên vẹn 100% trapframe cũ
     *(p->trapframe) = sf.saved_tf;
     
-    // 4. Phục hồi lại mặt nạ tín hiệu cũ của tiến trình
-    p->sig_blocked = sf.saved_mask;
+    // 3. Khôi phục lại signal mask cũ của tiến trình
+    p->blocked_signals = sf.saved_mask;
     
-    // 5. Trả về giá trị trong saved_tf (thường là a0 của luồng chính trước khi bị ngắt)
+    // 4. Trả về giá trị a0 cũ đã được khôi phục
     return p->trapframe->a0;
 }
-
 ```
+
+### b. Xử lý nguy cơ ghi đè `a0` trong Dispatcher của xv6
+* **Vấn đề:** Trong `kernel/syscall.c`, dispatcher của xv6 mặc định luôn gán:
+  `p->trapframe->a0 = syscalls[num]();`
+  Lệnh này sẽ ghi đè giá trị trả về của `sys_sigreturn()` vào `trapframe->a0`, làm sai lệch giá trị thanh ghi `a0` ban đầu của chương trình chính nếu không được xử lý cẩn thận.
+* **Giải pháp thống nhất với cả nhóm:**
+  Trong `syscall()` (`kernel/syscall.c`), bổ sung điều kiện loại trừ cho `SYS_sigreturn`:
+  ```c
+  if (num == SYS_sigreturn) {
+      sys_sigreturn(); // Không gán lại p->trapframe->a0 để giữ trọn vẹn ngữ cảnh khôi phục
+  } else {
+      p->trapframe->a0 = syscalls[num]();
+  }
+  ```
 
 ---
 
-## 7. Phương án xử lý `Nested Handlers` (Tín hiệu lồng nhau)
+## 8. Phương án xử lý `Nested Handlers` (Tín hiệu lồng nhau)
 
-* **Vấn đề:** Trong lúc hàm handler thứ nhất đang chạy, nếu một tín hiệu khác (được phép) gửi đến, tiến trình có thể bị ngắt lần nữa. Nếu không quản lý tốt, các `sigframe` trên user stack có thể chồng đè lên nhau gây hỏng dữ liệu.
-* **Phương án giải quyết (Cơ chế LIFO):**
-* Mỗi lần có tín hiệu mới xen ngang, kernel sẽ tiếp tục hạ con trỏ `sp` xuống thêm một đoạn bằng kích thước `sizeof(struct sigframe)` để dựng tầng frame mới ngay bên dưới tầng cũ (hoạt động theo nguyên tắc **LIFO - Vào sau ra trước**).
-* `sa_mask` của từng handler sẽ được áp dụng để tự động chặn các tín hiệu tương ứng, tránh việc một loại tín hiệu bị lặp vô tận làm tràn stack.
-* Khi từng handler kết thúc, các lệnh `sigreturn` sẽ lần lượt tháo gỡ các tầng frame theo đúng thứ tự LIFO, phục hồi hoàn hảo từng lớp ngữ cảnh trước đó.
-
-
-
-```
-
-```
+* **Cơ chế LIFO (Last-In, First-Out):**
+  * Khi đang thực thi một handler, nếu có một tín hiệu khác đến (và tín hiệu này không nằm trong `blocked_signals`), kernel tiếp tục hạ `sp` xuống thêm `sizeof(struct sigframe)` và dựng một tầng `sigframe` mới nằm đè dưới tầng cũ.
+  * Mỗi tầng `sigframe` lưu trữ chính xác `saved_tf` và `saved_mask` của thời điểm ngay trước khi nó bị ngắt.
+  * Khi các lệnh `sigreturn()` được gọi liên tiếp, kernel sẽ giải phóng các tầng frame theo đúng thứ tự LIFO, phục hồi từng lớp ngữ cảnh cho đến khi quay về luồng thực thi của chương trình chính.
+* **Ngăn ngừa tràn stack do tín hiệu lặp lại:**
+  * Nhờ cơ chế `p->blocked_signals |= (act->sa_mask | (1U << sig))`, tín hiệu cùng loại sẽ tự động bị chặn trong thời gian handler đang xử lý, ngăn chặn việc kích hoạt handler đệ quy vô tận làm tràn user stack.
