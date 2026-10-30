@@ -110,3 +110,29 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// --- Signal syscall stubs (Tuần 2: chỉ là khung, trả 0) ---
+
+uint64
+sys_sigaction(void)
+{
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  return 0;
+}
+
+uint64
+sys_sigprocmask(void)
+{
+  return 0;
+}
+
+uint64
+sys_alarm(void)
+{
+  return 0;
+}
