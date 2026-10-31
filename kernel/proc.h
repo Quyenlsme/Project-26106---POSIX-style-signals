@@ -105,10 +105,10 @@ struct proc {
   char name[16];               // Process name (debugging)
 
   // Signal state — p->lock must be held when using these:
-  sigset_t pending_signals;            // Các signal đang chờ xử lý
-  sigset_t blocked_signals;            // Các signal bị chặn
-  struct sigaction sig_actions[NSIG];  // Bảng hành vi của từng signal
+  sigset_t pending_signals;           // Các signal đang chờ xử lý
+  sigset_t blocked_signals;           // Các signal bị chặn
+  struct sigaction sig_actions[NSIG]; // Bảng hành vi của từng signal
 
   // Alarm state — p->lock must be held:
-  uint64 alarm_deadline;               // Giá trị ticks khi hết hạn; 0 = không có alarm
+  uint64 alarm_deadline; // Giá trị ticks khi hết hạn; 0 = không có alarm
 };
