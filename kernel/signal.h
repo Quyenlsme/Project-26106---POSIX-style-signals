@@ -23,8 +23,6 @@ typedef uint32 sigset_t;
 // --- Đặc biệt handler ---
 #define SIG_DFL      ((void (*)(int))0)   // Hành vi mặc định (POSIX standard)
 #define SIG_IGN      ((void (*)(int))1)   // Bỏ qua signal (POSIX standard)
-#define SIG_Default  SIG_DFL              // Alias
-#define SIG_Ignore   SIG_IGN              // Alias
 
 // --- Signal mask operations (dùng cho sigprocmask) ---
 #define SIG_BLOCK    0   // blocked |= set

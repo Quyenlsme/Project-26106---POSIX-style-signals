@@ -112,7 +112,6 @@ sys_uptime(void)
 }
 
 // --- Signal syscall stubs (Tuần 2: chỉ là khung, trả 0) ---
-
 uint64
 sys_sigaction(void)
 {
