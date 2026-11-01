@@ -47,4 +47,11 @@ struct sigaction {
     void); // Con trỏ tới hàm gọi sigreturn sau khi handler kết thúc
 };
 
+// Chuẩn hóa mặt nạ tín hiệu: lọc signal hỗ trợ và loại trừ UNBLOCKABLE_MASK
+static inline sigset_t
+sig_sanitize(sigset_t mask)
+{
+  return (mask & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
+}
+
 #endif // SIGNAL_H

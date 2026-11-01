@@ -160,3 +160,10 @@ sbrklazy(int n)
 {
   return sys_sbrk(n, SBRK_LAZY);
 }
+
+// Trampoline mặc định gọi sigreturn khi handler kết thúc
+void
+sigrestorer(void)
+{
+  sigreturn();
+}

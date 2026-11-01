@@ -150,8 +150,13 @@ syscall(void)
   num = p->trapframe->a7;
   if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
     // Use num to lookup the system call function for num, call it,
-    // and store its return value in p->trapframe->a0
-    p->trapframe->a0 = syscalls[num]();
+    // and store its return value in p->trapframe->a0.
+    // For sigreturn, registers are restored from the stack frame and must not be overwritten.
+    if (num == SYS_sigreturn) {
+      syscalls[num]();
+    } else {
+      p->trapframe->a0 = syscalls[num]();
+    }
   } else {
     printk("%d %s: unknown sys call %d\n", p->pid, p->name, num);
     p->trapframe->a0 = -1;

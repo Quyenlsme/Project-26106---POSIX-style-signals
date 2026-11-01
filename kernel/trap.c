@@ -94,8 +94,44 @@ usertrap(void)
   return satp;
 }
 
-// extern prototype for sig_setup_frame (implemented by Hưng's module)
-extern int sig_setup_frame(int sig, struct sigaction *act);
+//
+// Set up a signal frame on the user stack and prepare registers for handler execution.
+// Returns 0 on success, -1 on failure (e.g. invalid stack, copyout failure).
+//
+int
+sig_setup_frame(int sig, struct sigaction *act)
+{
+  struct proc *p = myproc();
+  struct sigframe sf;
+
+  // 1. Tính toán địa chỉ stack mới và ép căn lề 16-byte
+  uint64 new_sp = (p->trapframe->sp - sizeof(struct sigframe)) & ~0xFULL;
+
+  // Kiểm tra giới hạn: new_sp phải nhỏ hơn sp cũ (tránh tràn số học) và frame nằm trong [0, p->sz)
+  if (new_sp >= p->trapframe->sp || new_sp + sizeof(sf) > p->sz)
+    return -1;
+
+  // 2. Sao lưu ngữ cảnh cũ vào sigframe
+  sf.saved_tf = *(p->trapframe);
+  sf.saved_mask = p->blocked_signals;
+
+  // 3. Đẩy sigframe lên user stack
+  if (copyout(p->pagetable, p->sz, new_sp, (char *)&sf, sizeof(sf)) < 0)
+    return -1;
+
+  // 4. Áp dụng mặt nạ tín hiệu mới khi vào handler:
+  // Tự động chặn chính signal đang xử lý và các signal trong sa_mask
+  p->blocked_signals =
+    sig_sanitize(p->blocked_signals | act->sa_mask | (1U << sig));
+
+  // 5. Cài đặt các thanh ghi phần cứng cho handler theo RISC-V ABI:
+  p->trapframe->sp = new_sp;
+  p->trapframe->epc = (uint64)act->sa_handler;
+  p->trapframe->ra = (uint64)act->sa_restorer;
+  p->trapframe->a0 = sig;
+
+  return 0;
+}
 
 //
 // Deliver pending signals to the current process before returning to user space.
