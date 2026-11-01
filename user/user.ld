@@ -5,6 +5,7 @@ SECTIONS
  . = 0x0;
  
   .text : {
+    *(.text.entry)
     *(.text .text.*)
   }
 

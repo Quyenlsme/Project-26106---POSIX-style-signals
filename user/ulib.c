@@ -3,12 +3,13 @@
 #include "kernel/fcntl.h"
 #include "kernel/riscv.h"
 #include "kernel/vm.h"
+#include "kernel/syscall.h"
 #include "user/user.h"
 
 //
 // wrapper so that it's OK if main() does not call exit().
 //
-void
+void __attribute__((section(".text.entry")))
 start(int argc, char **argv)
 {
   int r;
@@ -162,8 +163,12 @@ sbrklazy(int n)
 }
 
 // Trampoline mặc định gọi sigreturn khi handler kết thúc
-void
+// Dùng naked để không tự ý cấp phát stack frame làm lệch con trỏ sp
+void __attribute__((naked))
 sigrestorer(void)
 {
-  sigreturn();
+  asm volatile("li a7, %0\n"
+               "ecall\n"
+               :
+               : "i"(SYS_sigreturn));
 }
