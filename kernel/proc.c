@@ -433,7 +433,7 @@ kwait(uint64 addr)
     }
 
     // No point waiting if we don't have any children.
-    if (!havekids || killed(p)) {
+    if (!havekids || sig_interrupted(p)) {
       release(&wait_lock);
       return -1;
     }
@@ -672,6 +672,31 @@ setkilled(struct proc *p)
   acquire(&p->lock);
   p->killed = 1;
   release(&p->lock);
+
+}
+
+// Tra ve 1 neu tien trinh can thoat khoi vong sleep dang cho:
+// da bi killed, hoac co signal pending, khong bi chan va khong bi SIG_IGN.
+int
+sig_interrupted(struct proc *p)
+{
+  int r = 0;
+
+  acquire(&p->lock);
+  if (p->killed) {
+    r = 1;
+  } else {
+    sigset_t blocked = (p->blocked_signals & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
+    sigset_t ready = p->pending_signals & SUPPORTED_MASK & ~blocked;
+    for (int i = 1; i < NSIG; i++) {
+      if ((ready & (1U << i)) && p->sig_actions[i].sa_handler != SIG_IGN) {
+        r = 1;
+        break;
+      }
+    }
+  }
+  release(&p->lock);
+  return r;
 }
 
 int

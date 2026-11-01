@@ -88,6 +88,7 @@ pagetable_t     proc_pagetable(struct proc *);
 void            proc_freepagetable(pagetable_t, uint64);
 int             kkill(int, int);
 int             sig_send(struct proc*, int);
+int             sig_interrupted(struct proc*);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
 struct cpu*     mycpu(void);
