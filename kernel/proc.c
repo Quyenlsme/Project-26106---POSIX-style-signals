@@ -146,6 +146,17 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // Signal state initialization
+  p->pending_signals = 0;
+  p->blocked_signals = 0;
+  p->alarm_deadline = 0;
+  for (int i = 0; i < NSIG; i++) {
+    p->sig_actions[i].sa_handler = SIG_DFL;
+    p->sig_actions[i].sa_mask = 0;
+    p->sig_actions[i].sa_flags = 0;
+    p->sig_actions[i].sa_restorer = 0;
+  }
+
   return p;
 }
 
@@ -167,6 +178,15 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->pending_signals = 0;
+  p->blocked_signals = 0;
+  p->alarm_deadline = 0;
+  for (int i = 0; i < NSIG; i++) {
+    p->sig_actions[i].sa_handler = SIG_DFL;
+    p->sig_actions[i].sa_mask = 0;
+    p->sig_actions[i].sa_flags = 0;
+    p->sig_actions[i].sa_restorer = 0;
+  }
   p->state = UNUSED;
 }
 
@@ -288,6 +308,14 @@ kfork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+
+  // Inherit signal mask and actions (D6); do NOT inherit pending and alarm.
+  np->blocked_signals = p->blocked_signals;
+  for (i = 0; i < NSIG; i++) {
+    np->sig_actions[i] = p->sig_actions[i];
+  }
+  np->pending_signals = 0;
+  np->alarm_deadline = 0;
 
   pid = np->pid;
 
@@ -594,25 +622,42 @@ wakeup(void *chan)
   }
 }
 
-// Kill the process with the given pid.
+// Send a signal to a process (caller must hold p->lock).
+int
+sig_send(struct proc *p, int sig)
+{
+  if (sig <= 0 || sig >= NSIG)
+    return -1;
+  p->pending_signals |= (1U << sig);
+  if (p->state == SLEEPING)
+    p->state = RUNNABLE;
+  return 0;
+}
+
+// Kill the process with the given pid and signal.
 // The victim won't exit until it tries to return
 // to user space (see usertrap() in trap.c).
 int
-kkill(int pid)
+kkill(int pid, int sig)
 {
   struct proc *p;
 
-  if (pid == 0)
+  if (pid <= 0 || sig <= 0 || sig >= NSIG)
     return -1;
 
   for (p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
-    if (p->pid == pid) {
-      p->killed = 1;
-      if (p->state == SLEEPING) {
-        // Wake process from sleep().
-        p->state = RUNNABLE;
+    if (p->pid == pid && p->state != UNUSED && p->state != ZOMBIE) {
+      if (sig == SIGKILL) {
+        p->killed = 1;
+        if (p->state == SLEEPING) {
+          // Wake process from sleep().
+          p->state = RUNNABLE;
+        }
+        release(&p->lock);
+        return 0;
       }
+      sig_send(p, sig);
       release(&p->lock);
       return 0;
     }

@@ -94,6 +94,67 @@ usertrap(void)
   return satp;
 }
 
+// extern prototype for sig_setup_frame (implemented by Hưng's module)
+extern int sig_setup_frame(int sig, struct sigaction *act);
+
+//
+// Deliver pending signals to the current process before returning to user space.
+//
+void
+sig_deliver(void)
+{
+  struct proc *p = myproc();
+  if (p == 0)
+    return;
+
+  // If already marked killed, exit immediately
+  if (p->killed)
+    kexit(-1);
+
+  acquire(&p->lock);
+  // Calculate signals ready for delivery:
+  // pending & supported & not blocked (except unblockable signals like SIGKILL)
+  sigset_t effective_blocked =
+    (p->blocked_signals & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
+  sigset_t ready = p->pending_signals & SUPPORTED_MASK & ~effective_blocked;
+  if (ready == 0) {
+    release(&p->lock);
+    return;
+  }
+
+  // Select signal with the lowest signal number
+  int sig = 0;
+  for (int i = 1; i < NSIG; i++) {
+    if (ready & (1U << i)) {
+      sig = i;
+      break;
+    }
+  }
+
+  // Claim signal: clear pending bit under p->lock
+  p->pending_signals &= ~(1U << sig);
+  release(&p->lock);
+
+  // Read action (private to process, no lock needed)
+  struct sigaction act = p->sig_actions[sig];
+
+  // SIG_IGN: ignore signal
+  if (act.sa_handler == SIG_IGN) {
+    return;
+  }
+
+  // SIG_DFL: default action terminates process with -1 (D5)
+  if (act.sa_handler == SIG_DFL) {
+    kexit(-1);
+  }
+
+  // User handler: setup frame on user stack
+  if (sig_setup_frame(sig, &act) < 0) {
+    // Bad stack frame, memory fault -> terminate process safely
+    kexit(-1);
+  }
+}
+
 //
 // set up trapframe and control registers for a return to user space
 //
@@ -101,6 +162,8 @@ void
 prepare_return(void)
 {
   struct proc *p = myproc();
+
+  sig_deliver();
 
   // we're about to switch the destination of traps from
   // kerneltrap() to usertrap(). because a trap from kernel

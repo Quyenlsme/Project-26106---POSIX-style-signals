@@ -137,6 +137,19 @@ kexec(char *path, char **argv)
   p->trapframe->sp = sp;         // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
+  // Signal state on exec (D6):
+  // User handlers are reset to SIG_DFL, but SIG_IGN is preserved.
+  // Mask and pending signals are preserved; alarm is cancelled.
+  for (int i = 0; i < NSIG; i++) {
+    if (p->sig_actions[i].sa_handler != SIG_IGN) {
+      p->sig_actions[i].sa_handler = SIG_DFL;
+      p->sig_actions[i].sa_mask = 0;
+      p->sig_actions[i].sa_flags = 0;
+      p->sig_actions[i].sa_restorer = 0;
+    }
+  }
+  p->alarm_deadline = 0;
+
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
 bad:

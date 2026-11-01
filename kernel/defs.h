@@ -86,7 +86,8 @@ int             growproc(int);
 void            proc_mapstacks(pagetable_t);
 pagetable_t     proc_pagetable(struct proc *);
 void            proc_freepagetable(pagetable_t, uint64);
-int             kkill(int);
+int             kkill(int, int);
+int             sig_send(struct proc*, int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
 struct cpu*     mycpu(void);
@@ -144,6 +145,7 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            prepare_return(void);
+void            sig_deliver(void);
 
 // uart.c
 void            uartinit(void);

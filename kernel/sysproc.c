@@ -93,9 +93,11 @@ uint64
 sys_kill(void)
 {
   int pid;
+  int sig;
 
   argint(0, &pid);
-  return kkill(pid);
+  argint(1, &sig);
+  return kkill(pid, sig);
 }
 
 // return how many clock tick interrupts have occurred
@@ -132,6 +134,13 @@ sys_sigprocmask(void)
 
 uint64
 sys_alarm(void)
+{
+  return 0;
+}
+
+// Weak stub: module của Hưng sẽ thay thế hàm này bằng bản cài đặt thật
+__attribute__((weak)) int
+sig_setup_frame(int sig, struct sigaction *act)
 {
   return 0;
 }
