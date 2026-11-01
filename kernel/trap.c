@@ -10,6 +10,7 @@ struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[];
+extern struct proc proc[NPROC];
 
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
@@ -262,6 +263,26 @@ kerneltrap()
   w_sstatus(sstatus);
 }
 
+//
+// Check alarm deadlines for all processes on timer tick (called from CPU 0).
+// Enqueues SIGALRM when a deadline expires.
+//
+void
+sig_alarm_check(uint64 now)
+{
+  struct proc *p;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED && p->state != ZOMBIE && p->alarm_deadline != 0) {
+      if ((long)(now - p->alarm_deadline) >= 0) {
+        p->alarm_deadline = 0; // One-shot: tự động hủy deadline
+        sig_send(p, SIGALRM);
+      }
+    }
+    release(&p->lock);
+  }
+}
+
 void
 clockintr()
 {
@@ -270,6 +291,7 @@ clockintr()
     ticks++;
     wakeup(&ticks);
     release(&tickslock);
+    sig_alarm_check(ticks);
   }
 
   // ask for the next timer interrupt. this also clears

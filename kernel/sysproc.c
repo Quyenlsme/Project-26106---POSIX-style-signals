@@ -207,11 +207,78 @@ sys_sigreturn(void)
 uint64
 sys_sigprocmask(void)
 {
+  int how;
+  uint64 set_addr;
+  uint64 oldset_addr;
+  struct proc *p = myproc();
+
+  argint(0, &how);
+  argaddr(1, &set_addr);
+  argaddr(2, &oldset_addr);
+
+  sigset_t in_set = 0;
+  // Nếu set != NULL, kiểm tra tính hợp lệ của how và nạp mask từ user
+  if (set_addr != 0) {
+    if (how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK)
+      return -1;
+    if (copyin(p->pagetable, p->sz, (char *)&in_set, set_addr, sizeof(in_set)) <
+        0)
+      return -1;
+  }
+
+  // Nếu oldset != NULL, sao chép mask cũ ra user trước khi đổi
+  if (oldset_addr != 0) {
+    sigset_t old_mask = p->blocked_signals;
+    if (copyout(p->pagetable, p->sz, oldset_addr, (char *)&old_mask,
+                sizeof(old_mask)) < 0)
+      return -1;
+  }
+
+  // Áp dụng mask mới
+  if (set_addr != 0) {
+    sigset_t sanitized_set = sig_sanitize(in_set);
+
+    if (how == SIG_BLOCK)
+      p->blocked_signals = sig_sanitize(p->blocked_signals | sanitized_set);
+    else if (how == SIG_UNBLOCK)
+      p->blocked_signals = sig_sanitize(p->blocked_signals & ~sanitized_set);
+    else if (how == SIG_SETMASK)
+      p->blocked_signals = sanitized_set;
+  }
+
   return 0;
 }
 
 uint64
 sys_alarm(void)
 {
-  return 0;
+  int ticks_count;
+  struct proc *p = myproc();
+
+  argint(0, &ticks_count);
+  if (ticks_count < 0)
+    return -1;
+
+  // Đọc ticks an toàn dưới tickslock
+  acquire(&tickslock);
+  uint64 now = ticks;
+  release(&tickslock);
+
+  acquire(&p->lock);
+  uint64 remaining = 0;
+  if (p->alarm_deadline > 0) {
+    if (p->alarm_deadline > now)
+      remaining = p->alarm_deadline - now;
+    else
+      remaining = 0;
+  }
+
+  if (ticks_count == 0) {
+    p->alarm_deadline = 0; // Hủy alarm
+  } else {
+    p->alarm_deadline = now + ticks_count; // Cài đặt deadline mới
+  }
+  release(&p->lock);
+
+  return remaining;
 }

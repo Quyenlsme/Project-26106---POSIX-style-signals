@@ -148,6 +148,7 @@ extern struct spinlock tickslock;
 void            prepare_return(void);
 void            sig_deliver(void);
 int             sig_setup_frame(int, struct sigaction *);
+void            sig_alarm_check(uint64);
 
 // uart.c
 void            uartinit(void);
