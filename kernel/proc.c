@@ -685,7 +685,7 @@ sig_interrupted(struct proc *p)
   if (p->killed) {
     r = 1;
   } else {
-    sigset_t blocked = 
+    sigset_t blocked =
       (p->blocked_signals & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
     sigset_t ready = p->pending_signals & SUPPORTED_MASK & ~blocked;
     for (int i = 1; i < NSIG; i++) {
