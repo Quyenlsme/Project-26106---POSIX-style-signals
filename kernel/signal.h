@@ -40,8 +40,10 @@ typedef uint32 sigset_t;
 
 // --- Cấu trúc signal action ---
 struct sigaction {
-  void (*sa_handler)(int); // Con trỏ hàm handler, SIG_DFL hoặc SIG_IGN
-  sigset_t sa_mask;        // Signal bị chặn bổ sung khi handler đang chạy
+  void (*sa_handler)(int);   // Con trỏ hàm handler, SIG_DFL hoặc SIG_IGN
+  sigset_t sa_mask;          // Signal bị chặn bổ sung khi handler đang chạy
+  int sa_flags;              // Cờ cấu hình bổ sung (mặc định 0)
+  void (*sa_restorer)(void); // Con trỏ tới hàm gọi sigreturn sau khi handler kết thúc
 };
 
 // --- Cấu trúc sigframe (lưu trên user stack) ---

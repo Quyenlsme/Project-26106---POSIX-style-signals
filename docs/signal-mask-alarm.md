@@ -1,245 +1,218 @@
-# Signal Mask và Alarm
+# Đặc tả Thiết kế Kỹ thuật: Signal Masking & Timer Alarm
 
-**Người phụ trách:** Nguyễn Trung Kiên  
-**Phạm vi:** `sigprocmask()`, `alarm()` và timer tick.  
-**Trạng thái:** Nghiên cứu và thiết kế; chưa triển khai, chưa build, chưa chạy test.
+* **Thành viên phụ trách:** Nguyễn Trung Kiên  
+* **Đề tài:** POSIX-style signals trên xv6-riscv (Mã đề tài: 26106)  
+* **Vai trò module:** Quản lý mặt nạ tín hiệu (`sigprocmask`), cơ chế hẹn giờ tín hiệu bất đồng bộ (`alarm`), tích hợp quét timer interrupt trong kernel, và chuẩn hóa bảo vệ hệ thống (`sig_sanitize`).
 
-## 1. Mục tiêu module
+---
 
-- Cho process chặn (block) và bỏ chặn (unblock) signal bằng `sigprocmask()`.
-- Signal bị chặn vẫn được ghi vào pending; khi bỏ chặn thì được delivery ở điểm trở về user tiếp theo.
-- Cho process đặt hẹn giờ bằng `alarm()`; khi hết hạn kernel đặt SIGALRM vào pending.
-- Timer interrupt chỉ cập nhật trạng thái tối thiểu, không chạy handler user.
+## 1. Bản chất Kỹ thuật: Masking và Sự khác biệt giữa Blocked và Pending
 
-Ngoài phạm vi: process group, `sigpending()`, `sigsuspend()`, alarm theo đơn vị thời gian thực (giây/ms), restart syscall.
+Trong mô hình tín hiệu POSIX, hai khái niệm **Blocked (Bị chặn)** và **Pending (Đang chờ)** có ý nghĩa hoàn toàn khác nhau về mặt kiến trúc:
 
-## 2. Khảo sát mã nguồn xv6
+| Khái niệm | Ý nghĩa kiến trúc | Nơi lưu trữ | Bản chất điều khiển |
+|---|---|---|---|
+| **`pending_signals`** | **Sự kiện thực tế:** Tín hiệu đã được gửi tới tiến trình nhưng chưa được xử lý. | Bitmask 32-bit trong `struct proc` (bảo vệ bởi `p->lock`). | Do bên ngoài hoặc phần cứng kích hoạt (bất đồng bộ). |
+| **`blocked_signals`** | **Chính sách của tiến trình:** Danh sách các tín hiệu mà tiến trình tạm thời chưa muốn tiếp nhận tại thời điểm hiện tại. | Bitmask 32-bit trong `struct proc` (dữ liệu private của tiến trình). | Do chính bản thân tiến trình chủ động thiết lập qua `sigprocmask()`. |
 
-Baseline đã khảo sát: commit `19959d4` của repo nhóm (xv6-riscv bản mới, dùng `kkill`, `kexit`, `sleep_prepare`/`sleep`).
+### Nguyên tắc Vàng của Signal Masking:
+> **Tín hiệu bị chặn (Blocked) KHÔNG bị biến mất, mà vẫn được ghi nhận vào `pending_signals`.**
 
-| Vị trí | Nhận xét liên quan |
-|---|---|
-| `kernel/proc.h:82` | `struct proc` chưa có trường signal nào. Chỉ có `killed` (dòng 88), được bảo vệ bởi `p->lock` |
-| `kernel/proc.c:110` | `allocproc()` khởi tạo state; cần thêm khởi tạo mask/alarm |
-| `kernel/proc.c:156` | `freeproc()` reset `killed`; cần reset thêm mask/pending/alarm |
-| `kernel/proc.c:259` | `kfork()` chưa copy trạng thái signal; cần quyết định con có thừa kế mask không |
-| `kernel/proc.c:601` | `kkill(pid)` chỉ đặt `killed = 1`, chưa có số hiệu signal |
-| `kernel/trap.c:38` | `usertrap()` xử lý syscall, interrupt, fault |
-| `kernel/trap.c:85` | Timer interrupt (`which_dev == 2`) chỉ gọi `yield()` |
-| `kernel/trap.c:101` | `prepare_return()` là điểm cuối cùng trước khi về user; nhóm chọn delivery ở đây |
-| `kernel/trap.c:167` | `clockintr()`: chỉ CPU 0 tăng `ticks` dưới `tickslock` và gọi `wakeup(&ticks)` |
-| `kernel/sysproc.c:68` | `sys_pause()` là ví dụ đọc `ticks` dưới `tickslock` |
-| `kernel/syscall.h:23` | Syscall cuối là `SYS_sync` = 22; số mới bắt đầu từ 23 (cần thống nhất để khỏi trùng) |
-| `kernel/console.c` | Chưa có xử lý Ctrl+C thành signal; đó là phần tích hợp của nhóm |
+Khi một tín hiệu đang nằm trong `blocked_signals` được gửi tới:
+1. Kernel vẫn bật bit tương ứng trong `p->pending_signals`.
+2. Nhưng khi tiến trình đi qua `prepare_return()`, kernel lọc theo công thức:
+   $$\text{ready} = \text{pending\_signals} \ \& \ \text{SUPPORTED\_MASK} \ \& \ \sim\text{blocked\_signals}$$
+   Vì tín hiệu đang bị block, bit đó không xuất hiện trong `ready`, do đó handler **tạm thời chưa được kích hoạt**.
+3. Khi tiến trình gọi `sigprocmask(SIG_UNBLOCK)` để gỡ bỏ mặt nạ, ngay ở lần trở về user mode tiếp theo, bit pending sẽ lọt vào tập `ready` và handler được kích hoạt tức thì.
 
-Ta có:
+---
 
-1. **`ticks` chỉ tăng ở CPU 0** (`trap.c:171`). Nhưng mọi CPU đều nhận timer interrupt. Vì vậy nếu mỗi process tự đếm lùi trong `usertrap()` mỗi khi `which_dev == 2`, tốc độ đếm phụ thuộc số CPU và process nào đang chạy. Thiết kế dùng `ticks` toàn cục sẽ nhất quán hơn (xem mục 5).
-2. **Timer interrupt đã có sẵn đường gọi `wakeup()` từ `clockintr()`**, trong đó `wakeup()` lấy `p->lock` của từng process. Nghĩa là thứ tự khóa `tickslock` → `p->lock` đã tồn tại và an toàn; alarm có thể dùng đúng thứ tự này.
+## 2. Chuẩn hóa Mặt nạ Tín hiệu: Hàm `sig_sanitize()`
 
-## 3. Phân tích signal mask
+Chuẩn POSIX quy định một số tín hiệu tối cao (đặc biệt là `SIGKILL`) **tuyệt đối không bao giờ được phép chặn hoặc bỏ qua**, nhằm đảm bảo hệ điều hành luôn có khả năng chấm dứt một tiến trình bị treo hoặc độc hại.
 
-### 3.1. Khái niệm
-
-- **Signal mask** (`blocked_signals`) là tập signal mà process đang chặn. Mỗi bit ứng với một signal.
-- **Pending** (`pending_signals`) là tập signal đã được gửi đến nhưng chưa được xử lý.
-- **Blocked khác pending:** blocked là *chính sách* của process ("chưa muốn nhận signal này"); pending là *sự kiện* ("signal này đã đến"). Signal bị chặn vẫn được ghi vào pending, chỉ không được chọn để delivery.
-- Signal đủ điều kiện delivery: `ready = pending & SUPPORTED_MASK & ~effective_blocked` (theo `docs/signal-delivery.md`).
-
-### 3.2. Biểu diễn (đề xuất, cần Quyền xác nhận)
-
+Hàm trợ giúp dùng chung trong kernel:
 ```c
-// trong struct proc, bảo vệ bởi p->lock
-uint32 pending_signals;
-uint32 blocked_signals;
+sigset_t sig_sanitize(sigset_t mask) {
+    // 1. Chỉ giữ lại các tín hiệu nằm trong tập kernel hỗ trợ
+    // 2. Gỡ bỏ bắt buộc bit của các tín hiệu không thể chặn (SIGKILL)
+    return (mask & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
+}
 ```
+Mọi thao tác thay đổi `blocked_signals` từ user-space đều phải đi qua `sig_sanitize()` trước khi được lưu vào `struct proc`.
 
-- Signal hợp lệ: `1 <= sig < NSIG`, `NSIG <= 32`; bit 0 không dùng.
-- Bit của signal `sig` là `1U << sig`, chỉ tính sau khi đã kiểm tra `sig` hợp lệ.
-- `SIGKILL` (nếu nhóm đưa vào phạm vi) nằm trong `UNBLOCKABLE_MASK`, không thể chặn.
+---
 
-### 3.3. Khi unblock thì signal được xử lý thế nào
+## 3. Thiết kế System Call `sigprocmask()`
 
-`sigprocmask()` chỉ cập nhật `blocked_signals`. Nó **không** gọi handler. Lần tới process đi qua `prepare_return()`, kernel tính lại `pending & ~blocked`; nếu có bit thì delivery như bình thường. Nhờ vậy:
+### 3.1. Chữ ký và Hằng số Điều khiển
+- Giao diện user: `int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);`
+- Ba thao tác tiêu chuẩn:
+  - `SIG_BLOCK` (0): Bổ sung thêm các tín hiệu vào danh sách chặn: $\text{blocked} \gets \text{blocked} \mid \text{set}$.
+  - `SIG_UNBLOCK` (1): Gỡ bỏ các tín hiệu khỏi danh sách chặn: $\text{blocked} \gets \text{blocked} \ \& \ \sim\text{set}$.
+  - `SIG_SETMASK` (2): Ghi đè toàn bộ danh sách chặn bằng mặt nạ mới: $\text{blocked} \gets \text{set}$.
 
-- Không chạy handler user trong ngữ cảnh syscall.
-- Signal đến trong lúc bị chặn không bị mất (bit pending được giữ).
-- Signal gửi nhiều lần khi đang chặn gộp thành một lần.
-
-Lưu ý: syscall `sigprocmask()` quay về user qua `usertrap()` → `prepare_return()`, nên signal vừa được bỏ chặn sẽ được delivery ngay khi syscall này trả về, trước lệnh kế tiếp của chương trình.
-
-## 4. Thuật toán block/unblock
-
-### 4.1. Giao diện đề xuất
-
-```c
-#define SIG_BLOCK    0   // blocked |= set
-#define SIG_UNBLOCK  1   // blocked &= ~set
-#define SIG_SETMASK  2   // blocked  = set
-
-int sigprocmask(int how, uint32 set, uint32 *oldset);
-```
-
-- `oldset` có thể là con trỏ NULL (0) nếu không cần giá trị cũ.
-- Trả 0 nếu thành công, -1 nếu `how` không hợp lệ hoặc `copyout` lỗi.
-- `set` được lọc: `set &= SUPPORTED_MASK & ~UNBLOCKABLE_MASK` (bit không hỗ trợ bị bỏ qua, không báo lỗi).
-
-> Cần thống nhất với Quyền/Hưng: truyền `set` theo giá trị hay theo con trỏ; kiểu `uint32` hay `uint64`.
-
-### 4.2. Pseudocode
-
+### 3.2. Thuật toán Xử lý trong Kernel (`ksigprocmask`)
+Để đảm bảo tính toàn vẹn (Atomicity) và an toàn bộ nhớ:
 ```text
-sys_sigprocmask():
-    lấy how, set, oldset_addr từ đối số
-    nếu how không thuộc {BLOCK, UNBLOCK, SETMASK}: trả -1
-
+ksigprocmask(how, set_user_addr, oldset_user_addr):
     p = myproc()
-    giữ p->lock
-    old = p->blocked_signals
-    set = set & SUPPORTED_MASK & ~UNBLOCKABLE_MASK
-    nếu how == BLOCK:    p->blocked_signals = old | set
-    nếu how == UNBLOCK:  p->blocked_signals = old & ~set
-    nếu how == SETMASK:  p->blocked_signals = set
-    thả p->lock
 
-    nếu oldset_addr != 0:
-        nếu copyout(p->pagetable, oldset_addr, &old, sizeof(old)) < 0:
-            trả -1        // mask đã đổi; cần thống nhất hành vi này
-    trả 0
+    1. Kiểm tra tham số:
+       - Nếu set_user_addr != 0:
+             Nếu how không thuộc {SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK}:
+                 trả về -1.
+
+    2. Lưu mặt nạ cũ ra User (nếu oldset_user_addr != 0):
+       - Đọc old_mask = p->blocked_signals;
+       - Sao chép ra user qua copyout(..., oldset_user_addr, &old_mask, ...);
+       - Nếu copyout thất bại: trả về -1 NGAY LẬP TỨC.
+       (Quy tắc an toàn: Không thay đổi trạng thái nếu việc sao lưu thất bại).
+
+    3. Cập nhật mặt nạ mới (nếu set_user_addr != 0):
+       - Sao chép dữ liệu từ user vào biến tạm in_set qua copyin().
+       - Nếu copyin thất bại: trả về -1.
+       - Chuẩn hóa: sanitized_set = sig_sanitize(in_set);
+       - Cập nhật vào trường private p->blocked_signals:
+           + Nếu how == SIG_BLOCK:   p->blocked_signals = sig_sanitize(p->blocked_signals | sanitized_set);
+           + Nếu how == SIG_UNBLOCK: p->blocked_signals = sig_sanitize(p->blocked_signals & ~sanitized_set);
+           + Nếu how == SIG_SETMASK: p->blocked_signals = sanitized_set;
+
+    4. Trả về 0 (thành công).
 ```
 
-> Điểm cần cân nhắc: nếu `copyout` lỗi sau khi đã đổi mask thì mask vẫn thay đổi. Cách đơn giản: kiểm tra/ghi `oldset` **trước**, hoặc ghi chú rõ hành vi này trong tài liệu và test.
+**Tính an toàn của `sigprocmask`:**
+Hàm này **tuyệt đối không gọi trực tiếp handler**. Khi `sigprocmask` trả về, luồng thực thi đi qua `prepare_return()`. Tại đây, module Delivery sẽ tự động phát hiện các pending signals vừa được giải phóng và kích hoạt handler một cách tự nhiên.
 
-## 5. Thiết kế alarm dựa trên timer tick
+---
 
-### 5.1. Quyết định chính
+## 4. Thiết kế Bộ Hẹn giờ: System Call `alarm()`
 
-| Vấn đề | Đề xuất | Lý do |
-|---|---|---|
-| Đơn vị | tick của `ticks` (xấp xỉ 0,1 giây trên QEMU, theo comment `trap.c:177`) | Nhất quán với `pause()`/`uptime()` |
-| Kiểu | one-shot | `AGENTS.md` không cho coi alarm là periodic mặc định; demo periodic tự re-arm trong handler |
-| Alarm mới thay alarm cũ | Có; trả về số tick còn lại của alarm cũ | Giống `alarm(2)` của POSIX |
-| `alarm(0)` | Hủy alarm, trả số tick còn lại | |
-| Lưu trạng thái | `uint64 alarm_deadline` (tick tuyệt đối) | Không cần cập nhật mỗi tick; so sánh bằng phép trừ để an toàn khi tràn |
-| Chạy handler | Không; chỉ đặt SIGALRM pending | Handler chạy ở `prepare_return()` |
+### 4.1. Kiến trúc Timer: Tại sao chọn `ticks` Toàn cục thay vì Đếm lùi?
+Trong xv6, ngắt timer (`clockintr`) xảy ra định kỳ khoảng 10 lần mỗi giây (khoảng 100ms/tick).
+- **Vấn đề khi cho tiến trình tự đếm lùi trong `usertrap()`:** Mỗi CPU core đều nhận timer interrupt độc lập. Nếu một tiến trình tự giảm biến đếm mỗi khi nhận timer interrupt, tốc độ đếm lùi sẽ phụ thuộc vào số lượng CPU của máy và thời gian tiến trình được lập lịch chạy, dẫn đến việc đếm giờ bị sai lệch nghiêm trọng giữa các môi trường chạy (`CPUS=1` so với `CPUS=4`).
+- **Giải pháp thiết kế:** Sử dụng biến toàn cục `ticks` của xv6 và lưu trữ **hạn chót tuyệt đối (Absolute Deadline)**:
+  $$\text{alarm\_deadline} = \text{ticks} + n$$
+  - Giá trị này hoàn toàn độc lập với việc tiến trình đang chạy hay đang ngủ.
+  - Kernel không cần cập nhật biến đếm lùi cho từng tiến trình ở mỗi tick, tiết kiệm tối đa chi phí CPU.
 
-### 5.2. Trạng thái cần lưu
+### 4.2. Xử lý Hết hạn trong Timer Interrupt (`sig_alarm_check`)
+Mỗi khi ngắt đồng hồ phần cứng xảy ra trên CPU 0, hàm `clockintr()` trong `kernel/trap.c` tăng biến toàn cục `ticks`, sau đó gọi `sig_alarm_check(ticks)`:
 
 ```c
-// trong struct proc, bảo vệ bởi p->lock
-uint64 alarm_deadline;   // giá trị ticks khi hết hạn; 0 = không có alarm
+void sig_alarm_check(uint64 now) {
+    struct proc *p;
+    for (p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        // Chỉ xét các tiến trình đang hoạt động và có cài đặt alarm
+        if (p->state != UNUSED && p->state != ZOMBIE && p->alarm_deadline != 0) {
+            // So sánh kiểu có dấu để an toàn tuyệt đối khi biến ticks bị tràn số (overflow)
+            if ((int64)(now - p->alarm_deadline) >= 0) {
+                p->alarm_deadline = 0;                  // Cơ chế One-shot: tự động hủy deadline
+                p->pending_signals |= (1U << SIGALRM); // Bật cờ báo tín hiệu SIGALRM đang chờ
+                if (p->state == SLEEPING) {
+                    p->state = RUNNABLE;                // Đánh thức nếu tiến trình đang ngủ chờ alarm
+                }
+            }
+        }
+        release(&p->lock);
+    }
+}
 ```
 
-`alarm()` cần lưu **deadline** (không phải số tick còn lại) vì hai lý do: process có thể ngủ hoặc không được lên lịch trong thời gian chờ, nhưng alarm vẫn phải hết hạn đúng lúc; và kernel không phải cập nhật mỗi tick cho mọi process.
+### 4.3. Quy tắc Thứ tự Khóa Tuyệt đối (Lock Ordering Invariant)
+Trong kernel xv6, quy tắc thứ tự khóa giữa timer và tiến trình là:
+$$\text{tickslock} \longrightarrow p\text{->lock}$$
+Trong hàm `kalarm()`, để đọc biến `ticks` và gán `alarm_deadline`, kernel **tuyệt đối không lồng hai khóa này vào nhau**:
+```c
+// Bước 1: Đọc ticks dưới tickslock rồi nhả ngay
+acquire(&tickslock);
+uint64 now = ticks;
+release(&tickslock);
 
-### 5.3. Khi timer hết hạn
-
-Trong `clockintr()` (chỉ CPU 0, sau khi tăng `ticks` và nhả `tickslock`):
-
-```text
-alarm_check(now):
-    duyệt từng slot p trong bảng tiến trình:
-        giữ p->lock
-        nếu p->state != UNUSED && p->state != ZOMBIE
-           && p->alarm_deadline != 0
-           && (int64)(now - p->alarm_deadline) >= 0:
-            p->alarm_deadline = 0                  // one-shot
-            signal_enqueue_locked(p, SIGALRM)      // hàm của Quyền
-        thả p->lock
+// Bước 2: Thao tác trên proc dưới p->lock
+acquire(&p->lock);
+// tính remaining và gán deadline...
+release(&p->lock);
 ```
+Thiết kế này triệt tiêu hoàn toàn nguy cơ xảy ra khóa chết (Deadlock) giữa các CPU.
 
-- Hàm chỉ đặt bit pending, không sửa trapframe và không chạy handler.
-- SIGALRM vẫn được ghi pending dù đang bị chặn; delivery chờ đến khi bỏ chặn.
-- Duyệt cả bảng mỗi tick (NPROC = 64) là chấp nhận được ở quy mô xv6; nếu muốn tối ưu có thể lưu deadline nhỏ nhất, nhưng chưa cần.
+### 4.4. Cơ chế One-shot và Kỹ thuật Hẹn giờ Tuần hoàn (Periodic Re-arming)
+Chuẩn POSIX quy định `alarm()` là cơ chế kích hoạt một lần duy nhất (**One-shot**).
+- Khi hết hạn, `alarm_deadline` tự động trở về `0`.
+- **Nếu muốn tạo đồng hồ chạy tuần hoàn (Periodic Timer):** Người lập trình chỉ cần gọi lại `alarm(n)` ngay bên trong thân của hàm handler xử lý `SIGALRM` (kỹ thuật Re-arming).
+- Nếu gọi `alarm(0)`: Hủy bỏ bộ hẹn giờ hiện tại, không có tín hiệu nào được phát ra.
 
-> Thứ tự khóa: `clockintr()` không giữ `tickslock` khi gọi `alarm_check()`, và bản thân `wakeup()` đã lấy `p->lock` trong lúc giữ `tickslock`, nên không có đường lấy ngược thứ tự. Khi triển khai vẫn cần xác nhận lại bằng cách đọc code.
+---
 
-### 5.4. `sys_alarm()`
+## 5. Vòng đời Tiến trình đối với Masking và Alarm
 
-```text
-sys_alarm(n):
-    lấy n (tick) từ đối số; nếu n < 0: trả -1
-    p = myproc()
-    now = đọc ticks dưới tickslock (nhả trước khi lấy p->lock)
-    giữ p->lock
-    còn_lại = (p->alarm_deadline == 0) ? 0 : max(0, p->alarm_deadline - now)
-    p->alarm_deadline = (n == 0) ? 0 : now + n
-    thả p->lock
-    trả còn_lại
-```
+| Thao tác Vòng đời | Xử lý `blocked_signals` | Xử lý `alarm_deadline` | Nguyên lý Thiết kế |
+|---|---|---|---|
+| **`allocproc()`** | Khởi tạo `= 0` | Khởi tạo `= 0` | Tiến trình mới tạo không bị chặn tín hiệu nào và không có timer. |
+| **`kfork()`** | **Thừa kế** từ cha | **Không thừa kế** (`= 0`) | Tiến trình con nhận cùng chính sách bảo vệ tín hiệu của cha; nhưng timer hẹn giờ là riêng biệt cho từng tiến trình. |
+| **`kexec()`** | **Giữ nguyên** | **Hủy bỏ** (`= 0`) | Binary mới kế thừa môi trường chặn tín hiệu của tiến trình cũ; nhưng timer của chương trình cũ bị hủy. |
+| **`freeproc()`** | Xóa sạch `= 0` | Xóa sạch `= 0` | Giải phóng tài nguyên an toàn khi tiến trình kết thúc. |
 
-Đọc `ticks` và lấy `p->lock` tách nhau (không lồng) để tránh tạo thứ tự khóa mới.
+---
 
-### 5.5. Vòng đời process
-
-| Sự kiện | Hành vi đề xuất |
-|---|---|
-| `allocproc()` | `blocked_signals = 0`, `pending_signals = 0`, `alarm_deadline = 0` |
-| `kfork()` | Con thừa kế `blocked_signals` của cha (giống POSIX); **không** thừa kế pending và alarm |
-| `exec()` | Giữ mask; alarm bị hủy (đề xuất); cần thống nhất |
-| `kexit()` / `freeproc()` | Đặt `alarm_deadline = 0`, xóa pending/blocked |
-| Alarm hết hạn khi process là ZOMBIE | Bỏ qua (điều kiện trạng thái ở 5.3) |
-
-## 6. Bảng test cases (kế hoạch, chưa chạy)
-
-> Tất cả các dòng dưới đây là **kế hoạch kiểm thử**. Trạng thái đều là "chưa chạy"; chỉ ghi PASS/FAIL sau khi đã triển khai và chạy thật (đính kèm lệnh và log).
-
-| # | Tình huống | Setup | Action | Expected | Trạng thái |
-|---|---|---|---|---|---|
-| T1 | Block và pending | Đăng ký handler SIGUSR1; block SIGUSR1 | Tự `kill(getpid(), SIGUSR1)` | Handler chưa chạy; signal ở pending | Chưa chạy |
-| T2 | Unblock → delivery | Tiếp T1 | `sigprocmask(SIG_UNBLOCK, SIGUSR1)` | Handler chạy đúng 1 lần ngay sau khi syscall trả về | Chưa chạy |
-| T3 | Gộp signal lặp | Block SIGUSR1 | Gửi SIGUSR1 3 lần, rồi unblock | Handler chạy đúng 1 lần | Chưa chạy |
-| T4 | `oldset` và `how` sai | Mask đã biết | Gọi với `how=99`; gọi `SETMASK` với `oldset` hợp lệ | `how=99` trả -1 và mask không đổi; `oldset` trả mask cũ | Chưa chạy |
-| T5 | Alarm one-shot | Handler SIGALRM tăng biến đếm | `alarm(5)` rồi chờ | Handler chạy 1 lần sau khoảng 5 tick; không chạy lần 2 | Chưa chạy |
-| T6 | Alarm re-arm (periodic) | Handler gọi `alarm(5)` lại | Chờ khoảng 30 tick | Handler chạy nhiều lần, khoảng cách xấp xỉ 5 tick | Chưa chạy |
-| T7 | Thay và hủy alarm | `alarm(50)` | `alarm(5)` rồi `alarm(0)` | Lần 2 trả số tick còn lại của alarm cũ; sau `alarm(0)` không có signal | Chưa chạy |
-| T8 | Alarm + mask | Block SIGALRM | `alarm(3)`, chờ hết hạn, rồi unblock | SIGALRM giữ pending khi bị chặn; handler chạy sau unblock | Chưa chạy |
-| T9 | Alarm khi đang ngủ | Process gọi `pause()` dài | `alarm(3)` trước đó | Signal được ghi pending đúng hạn (delivery theo chính sách sleep đã chốt) | Chưa chạy |
-| T10 | Exit và fork | Process có alarm đang chạy | Process exit; hoặc `fork()` | Không panic, không alarm "mồ côi"; con không có alarm của cha | Chưa chạy |
-| T11 | Đa CPU | Chạy T5, T6 | `CPUS=1` và `CPUS=4` | Kết quả như nhau (không nhân tốc độ theo số CPU) | Chưa chạy |
-
-## 7. Vấn đề cần thống nhất với Quyền và Hưng
-
-**Với Quyền (pending, chọn signal, delivery):**
-
-1. Tên và kiểu trường: `pending_signals`, `blocked_signals` (`uint32`), cùng `SUPPORTED_MASK`, `UNBLOCKABLE_MASK` — ai định nghĩa và ở file nào?
-2. `signal_enqueue_locked(p, SIGALRM)` có đặt thêm `killed`/wakeup khi process đang ngủ không? (Đề xuất: SIGALRM chỉ pending, không đánh thức.)
-3. Số hiệu signal: SIGALRM, SIGUSR1, SIGINT... nhóm chốt giá trị nào, và `kill` mang chữ ký `kill(pid, sig)` như thế nào (đổi chữ ký `kill` ảnh hưởng `user/kill.c`, `user.h`, `usys.pl`).
-4. Điểm delivery ở đầu `prepare_return()` (trước `intr_off()`): `sigprocmask()` có cần gọi gì thêm không, hay chỉ đổi mask?
-5. Thứ tự khóa khi `clockintr()` gọi enqueue.
-
-**Với Hưng (handler, frame, sigreturn):**
-
-1. Mask khi vào handler: `handler_mask = old_mask | sa_mask | bit(sig)`; `sigreturn()` khôi phục đúng `old_mask` đã lưu trong frame.
-2. `sigreturn()` ghi mask trực tiếp hay gọi chung hàm với `sigprocmask()` (nên có một hàm nội bộ duy nhất để áp dụng bộ lọc `SUPPORTED_MASK` và `UNBLOCKABLE_MASK`)?
-3. Alarm re-arm trong handler: `alarm()` gọi từ handler phải hoạt động bình thường (không phụ thuộc vào việc mask đang bị chặn SIGALRM).
-4. Nested handler: SIGALRM đến khi đang chạy handler của signal khác.
-
-**Syscall chung:** số syscall mới (`sigaction`, `sigreturn`, `sigprocmask`, `alarm`) — thống nhất thứ tự để ba PR không xung đột trong `kernel/syscall.h`, `kernel/syscall.c`, `user/usys.pl`, `user/user.h`.
-
-## 8. Sơ đồ alarm → pending → delivery
+## 6. Sơ đồ Luồng Hoạt động Tổng thể của Alarm & Mask
 
 ```mermaid
 sequenceDiagram
-    participant U as User process
-    participant S as sys_alarm
-    participant T as clockintr (CPU 0)
-    participant P as struct proc
-    participant R as prepare_return
-    participant H as Handler (user)
+    autonumber
+    participant App as Chương trình User
+    participant Sys as System Call (sys_alarm / sys_sigprocmask)
+    participant Clock as clockintr (CPU 0)
+    participant Proc as struct proc
+    participant Trap as prepare_return()
+    participant Handler as SIGALRM Handler
 
-    U->>S: alarm(n)
-    S->>P: alarm_deadline = ticks + n
-    Note over T: mỗi tick: ticks++
-    T->>P: now >= alarm_deadline ?
-    T->>P: alarm_deadline = 0, pending |= SIGALRM
-    Note over P: nếu SIGALRM bị blocked, vẫn nằm trong pending
-    R->>P: ready = pending & ~blocked
-    alt có signal ready
-        R->>H: dựng frame, về user chạy handler
-        H->>U: sigreturn() khôi phục ngữ cảnh và mask
-    else không có
-        R->>U: về user bình thường
+    App->>Sys: sigprocmask(SIG_BLOCK, SIGALRM)
+    Sys->>Proc: blocked_signals |= (1 << SIGALRM)
+    
+    App->>Sys: alarm(5)
+    Sys->>Proc: alarm_deadline = ticks + 5
+    
+    Note over Clock, Proc: Đồng hồ hệ thống trôi dần từng tick...
+    Clock->>Proc: now >= alarm_deadline ?
+    Clock->>Proc: alarm_deadline = 0, pending_signals |= (1 << SIGALRM)
+    Note over Proc: Tín hiệu bị chặn: nằm chờ trong pending, chưa thể delivery!
+    
+    App->>Sys: sigprocmask(SIG_UNBLOCK, SIGALRM)
+    Sys->>Proc: blocked_signals &= ~(1 << SIGALRM)
+    
+    Note over Sys, Trap: Syscall kết thúc, tiến trình đi qua prepare_return()
+    Trap->>Proc: ready = pending & ~blocked (SIGALRM xuất hiện!)
+    Trap->>Handler: Kích hoạt User Handler cho SIGALRM
+    opt Tự Re-arm tuần hoàn
+        Handler->>Sys: alarm(5) (Cài đặt chu kỳ hẹn giờ tiếp theo)
     end
+    Handler->>Trap: sigreturn() quay về luồng chính
 ```
 
+---
+
+## 7. Ma trận Kiểm thử Module Masking & Alarm
+
+### Bảng Kiểm thử Mặt nạ Tín hiệu (`MK-01` đến `MK-07`)
+| Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi |
+|---|---|---|---|
+| **MK-01** | Chặn tín hiệu bằng `SIG_BLOCK` | Đăng ký handler `SIGUSR1`, gọi `sigprocmask(SIG_BLOCK, &set, 0)` | `SIGUSR1` bị chặn, gửi signal không kích hoạt handler |
+| **MK-02** | Bỏ chặn tín hiệu bằng `SIG_UNBLOCK` | Tiếp nối MK-01, gửi signal, sau đó unblock | Handler được gọi thực thi ngay sau khi `sigprocmask` trả về |
+| **MK-03** | Thiết lập toàn bộ mask bằng `SIG_SETMASK` | Gọi `SETMASK` với tập bit mới | `blocked_signals` đổi chính xác theo mask mới |
+| **MK-04** | Đọc mask cũ qua tham số `oldset` | Gọi `sigprocmask` với `oldset` hợp lệ | Nhận đúng giá trị mask của trạng thái trước đó |
+| **MK-05** | Ngăn chặn việc chặn `SIGKILL` | Cố tình truyền bit `SIGKILL` vào `set` | Bit `SIGKILL` bị `sig_sanitize` loại bỏ, không thể chặn |
+| **MK-06** | Tham số `how` không hợp lệ | Truyền `how = 99` | Syscall trả về `-1`, mask không bị biến đổi |
+| **MK-07** | Con trỏ `set` hoặc `oldset` rác | Truyền địa chỉ bộ nhớ không hợp lệ | Syscall phát hiện lỗi copy và trả về `-1` |
+
+### Bảng Kiểm thử Hẹn giờ Alarm (`AL-01` đến `AL-07`)
+| Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi |
+|---|---|---|---|
+| **AL-01** | Hẹn giờ cơ bản `alarm(n)` | Đặt handler `SIGALRM`, gọi `alarm(5)` | Handler được gọi sau khoảng 5 ticks |
+| **AL-02** | Hủy hẹn giờ qua `alarm(0)` | Gọi `alarm(50)`, sau đó gọi `alarm(0)` | Hủy thành công, không có `SIGALRM` nào kích hoạt |
+| **AL-03** | Ghi đè hẹn giờ cũ | Gọi `alarm(50)`, sau đó gọi `alarm(10)` | Trả về số tick còn lại của lần trước (~50), deadline mới theo 10 |
+| **AL-04** | Demo Periodic Timer (tự re-arm) | Trong handler `SIGALRM`, gọi lại `alarm(5)` | Handler được gọi đều đặn theo chu kỳ ~5 ticks |
+| **AL-05** | Kết hợp `alarm` và `sigprocmask` | Block `SIGALRM`, gọi `alarm(3)`, chờ 5 ticks | Alarm hết hạn, `SIGALRM` giữ pending; khi unblock thì handler chạy |
+| **AL-06** | Độc lập đa CPU với Alarm | Chạy test alarm trên `CPUS=1` và `CPUS=4` | Tốc độ trôi deadline không bị phụ thuộc số lượng CPU |
+| **AL-07** | Fork không thừa kế Alarm | Cha gọi `alarm(50)`, gọi `fork()` | Tiến trình con có `alarm_deadline == 0`, không bị kích hoạt nhầm |

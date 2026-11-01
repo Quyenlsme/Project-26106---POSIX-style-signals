@@ -95,20 +95,18 @@ struct proc {
   struct proc *parent; // Parent process
 
   // these are private to the process, so p->lock need not be held.
-  uint64 kstack;               // Virtual address of kernel stack
-  uint64 sz;                   // Size of process memory (bytes)
-  pagetable_t pagetable;       // User page table
-  struct trapframe *trapframe; // data page for trampoline.S
-  struct context context;      // swtch() here to run process
-  struct file *ofile[NOFILE];  // Open files
-  struct inode *cwd;           // Current directory
-  char name[16];               // Process name (debugging)
+  uint64 kstack;                      // Virtual address of kernel stack
+  uint64 sz;                          // Size of process memory (bytes)
+  pagetable_t pagetable;              // User page table
+  struct trapframe *trapframe;        // data page for trampoline.S
+  struct context context;             // swtch() here to run process
+  struct file *ofile[NOFILE];         // Open files
+  struct inode *cwd;                  // Current directory
+  char name[16];                      // Process name (debugging)
+  sigset_t blocked_signals;           // Private: Mặt nạ tín hiệu của tiến trình
+  struct sigaction sig_actions[NSIG]; // Private: Bảng hành vi của từng signal
 
-  // Signal state — p->lock must be held when using these:
-  sigset_t pending_signals;           // Các signal đang chờ xử lý
-  sigset_t blocked_signals;           // Các signal bị chặn
-  struct sigaction sig_actions[NSIG]; // Bảng hành vi của từng signal
-
-  // Alarm state — p->lock must be held:
-  uint64 alarm_deadline; // Giá trị ticks khi hết hạn; 0 = không có alarm
+  // Signal & Alarm state — p->lock must be held when using these:
+  sigset_t pending_signals; // Các signal đang chờ xử lý
+  uint64 alarm_deadline;    // Giá trị ticks khi hết hạn; 0 = không có alarm
 };
