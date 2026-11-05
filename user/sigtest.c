@@ -150,6 +150,31 @@ test_alarm(void)
   }
   printf("  [PASS] Negative ticks rejected with -1\n");
 
+  // Test 2.6: AL-07 - Fork không thừa kế alarm
+  alarm(100);
+  int fpid = fork();
+  if (fpid < 0) {
+    printf("  [FAIL] fork failed in alarm test\n");
+    exit(1);
+  }
+  if (fpid == 0) {
+    // Tiến trình con: kiểm tra alarm(0) có trả về 0 không
+    // Nếu con không thừa kế (alarm_deadline == 0), alarm(0) phải trả về 0
+    int child_rem = alarm(0);
+    if (child_rem != 0) {
+      exit(1);
+    }
+    exit(0);
+  }
+  alarm(0); // Cha dọn dẹp timer
+  int status = 0;
+  wait(&status);
+  if (status != 0) {
+    printf("  [FAIL] AL-07: child process inherited alarm deadline!\n");
+    exit(1);
+  }
+  printf("  [PASS] AL-07: child does not inherit alarm deadline after fork\n");
+
   printf("  => alarm tests: ALL PASSED\n\n");
 }
 
