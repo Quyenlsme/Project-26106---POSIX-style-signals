@@ -47,10 +47,4 @@ struct sigaction {
     void); // Con trỏ tới hàm gọi sigreturn sau khi handler kết thúc
 };
 
-// --- Cấu trúc sigframe (lưu trên user stack) ---
-struct sigframe {
-  struct trapframe saved_tf; // Toàn bộ ngữ cảnh thanh ghi trước khi nhận signal
-  sigset_t saved_mask;       // Signal mask cũ của tiến trình
-};
-
 #endif // SIGNAL_H

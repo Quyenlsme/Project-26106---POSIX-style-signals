@@ -80,6 +80,12 @@ enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 #include "signal.h"
 
+// Cấu trúc sigframe lưu trên user stack khi chạy handler (chỉ kernel sử dụng)
+struct sigframe {
+  struct trapframe saved_tf; // Toàn bộ ngữ cảnh thanh ghi trước khi nhận signal
+  sigset_t saved_mask;       // Signal mask cũ của tiến trình
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
