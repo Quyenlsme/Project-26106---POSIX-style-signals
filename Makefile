@@ -153,6 +153,9 @@ UPROGS=\
 	$U/_sync\
 	$U/_killtest\
 	$U/_sigtest\
+	$U/_pausetest\
+	$U/_alarm_demo\
+	$U/_mask_demo\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

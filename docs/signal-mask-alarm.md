@@ -216,3 +216,99 @@ sequenceDiagram
 | **AL-05** | Kết hợp `alarm` và `sigprocmask` | Block `SIGALRM`, gọi `alarm(3)`, chờ 5 ticks | Alarm hết hạn, `SIGALRM` giữ pending; khi unblock thì handler chạy |
 | **AL-06** | Độc lập đa CPU với Alarm | Chạy test alarm trên `CPUS=1` và `CPUS=4` | Tốc độ trôi deadline không bị phụ thuộc số lượng CPU |
 | **AL-07** | Fork không thừa kế Alarm | Cha gọi `alarm(50)`, gọi `fork()` | Tiến trình con có `alarm_deadline == 0`, không bị kích hoạt nhầm |
+
+---
+
+## 8. Đặc tả Semantics `pause(n)` tương tác với Signals
+
+### 8.1. Hiện trạng Syscall `pause(int n)` trong xv6-riscv
+Trong baseline xv6-riscv hiện hành, syscall đưa tiến trình vào trạng thái ngủ theo thời gian được định nghĩa là `int pause(int n)` (số hiệu `SYS_pause 13`), thay thế cho hàm `sleep(n)` cũ của xv6.
+- **Vòng lặp chờ:**
+  ```c
+  while (ticks - ticks0 < n) {
+    if (sig_interrupted(myproc())) {
+      release(&tickslock);
+      return -1;
+    }
+    sleep_prepare(&ticks);
+    release(&tickslock);
+    sleep();
+    acquire(&tickslock);
+  }
+  ```
+- **Hành vi khi có Signal:**
+  1. Khi nhận tín hiệu có thể phân phối (deliverable: không bị mask trong `blocked_signals` và không đặt `SIG_IGN`), `sig_interrupted()` trả về 1.
+  2. `sys_pause()` ngắt vòng lặp ngay lập tức và trả về `-1`.
+  3. Giá trị `-1` được nạp vào `p->trapframe->a0`.
+  4. Trước khi trở lại user mode, kernel đi qua `prepare_return() -> sig_deliver() -> sig_setup_frame()` để thiết lập frame và thực thi handler.
+  5. Khi handler kết thúc bằng `sigreturn()`, giá trị `a0 = -1` được khôi phục nguyên vẹn, người dùng nhận giá trị trả về `-1` biểu thị syscall đã bị ngắt bởi tín hiệu.
+- **Hành vi khi Signal bị Block hoặc Ignore:**
+  - Nếu signal gửi đến đang nằm trong `blocked_signals`, `sig_interrupted()` trả về 0. `pause` tiếp tục ngủ đủ `n` ticks và trả về 0.
+  - Sau khi `pause` kết thúc, nếu user unblock signal đó thì handler mới được kích hoạt.
+- **Hỗ trợ mô phỏng POSIX `pause(void)`:**
+  - Để chờ vô hạn cho tới khi có tín hiệu đánh thức (chuẩn POSIX `pause()`), chương trình user có thể gọi `pause(0x7fffffff)`. Khi có signal đến, tiến trình thức dậy ngay và trả về `-1`.
+
+### 8.2. Ma trận Kiểm thử `pause()` (`PA-01` đến `PA-06`)
+| Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi |
+|---|---|---|---|
+| **PA-01** | Gọi `pause(0)` | Gọi `pause(0)` | Trả về `0` ngay lập tức |
+| **PA-02** | `SIGALRM` ngắt `pause` dài | Đăng ký handler, đặt `alarm(5)`, gọi `pause(1000)` | Trả về `-1`, handler chạy 1 lần, thức dậy sau < 100 ticks |
+| **PA-03** | `SIGALRM` bị block | Chặn `SIGALRM`, `alarm(3)`, gọi `pause(10)` | Trả về `0`, ngủ đủ 10 ticks, unblock xong handler mới chạy |
+| **PA-04** | Tín hiệu bị bỏ qua `SIG_IGN` | Đặt `SIGUSR1 = SIG_IGN`, tiến trình con gửi `SIGUSR1` trong lúc cha `pause(15)` | `pause` không bị ngắt, trả về `0` |
+| **PA-05** | Tiến trình khác gửi signal ngắt `pause` | Đặt handler `SIGUSR1`, con gửi `SIGUSR1` trong lúc cha `pause(1000)` | `pause` bị ngắt, trả về `-1`, handler chạy 1 lần |
+| **PA-06** | Mô phỏng chờ vô hạn | Đặt `alarm(5)`, gọi `pause(0x7fffffff)` | Thức dậy bởi `SIGALRM`, trả về `-1` |
+
+---
+
+## 9. Khảo sát Kiến trúc và Thiết kế Định tuyến Bắt phím `Ctrl-C` $\to$ `SIGINT`
+
+### 9.1. Luồng Nhận Ký tự từ Bàn phím trên xv6
+```
+Bàn phím -> UART Phần cứng -> Ngắt UART -> plic_claim() -> uartintr() -> consoleintr(int c)
+```
+Trong `kernel/console.c`, hàm `consoleintr(c)` tiếp nhận từng ký tự:
+- Đã hỗ trợ: `Ctrl-P` (`procdump`), `Ctrl-U` (xóa dòng), `Ctrl-H` / Delete (xóa ký tự), `Ctrl-D` (EOF).
+- **Chưa có nhánh xử lý `Ctrl-C` (`C('C')` = ASCII 0x03):** Hiện tại ký tự rơi vào nhánh `default`, được in ra màn hình và đẩy vào circular buffer `cons.buf` như ký tự thông thường.
+
+### 9.2. Phân tích Các Phương án Xác định Foreground Process
+| Phương án | Cơ chế hoạt động | Ưu điểm | Nhược điểm | Đánh giá |
+|---|---|---|---|---|
+| **PA-1 (Đề xuất)** | Thêm biến toàn cục `fg_pid` trong kernel (bảo vệ bởi `cons.lock`) + syscall `setfg(int pid)`. Shell `sh.c` gọi `setfg(child_pid)` trước `wait(0)` và `setfg(0)` sau khi lệnh xong. | Đơn giản, an toàn, can thiệp tối thiểu vào xv6 kernel. | Chỉ ngắt được 1 tiến trình con trực tiếp, chưa hỗ trợ chuỗi pipeline `a \| b`. | **Khả thi nhất cho đồ án** |
+| **PA-2** | Bổ sung khái niệm Process Group (`p->pgid`) + syscall `setpgid()`. `Ctrl-C` gửi `SIGINT` cho toàn bộ nhóm tiến trình tiền cảnh. | Chuẩn POSIX, hỗ trợ ngắt toàn bộ pipeline. | Phức tạp, phải sửa `allocproc`, `kfork`, vòng đời tiến trình. | Để dành cho giai đoạn Stretch |
+| **PA-3** | Quét toàn bộ bảng `proc[]`, gửi `SIGINT` cho mọi tiến trình `pid > 2`. | Không cần sửa `sh.c`. | Giết nhầm cả tiến trình daemon/background (`&`). | Không dùng |
+
+### 9.3. Thiết kế Chi tiết Phương án 1 (PA-1)
+1. **Trong `kernel/console.c`:**
+   ```c
+   static int fg_pid = 0; // Bảo vệ bởi cons.lock
+
+   void console_setfg(int pid) {
+     acquire(&cons.lock);
+     fg_pid = pid;
+     release(&cons.lock);
+   }
+
+   void consoleintr(int c) {
+     acquire(&cons.lock);
+     switch (c) {
+     case C('C'):
+       consputc('^'); consputc('C'); consputc('\n');
+       if (fg_pid > 0) {
+         kkill(fg_pid, SIGINT);
+       }
+       break;
+     ...
+   ```
+2. **Trong `user/sh.c`:**
+   ```c
+   int pid = fork1();
+   if (pid == 0)
+     runcmd(parsecmd(cmd));
+   setfg(pid);
+   wait(0);
+   setfg(0);
+   ```
+3. **Quy tắc An toàn và Locking Invariant:**
+   - `consoleintr` thực thi trong ngữ cảnh ngắt thiết bị. Hàm `kkill()` chỉ thao tác trên spinlock (`p->lock`), không gọi `sleep()` hay yield CPU, hoàn toàn an toàn khi gọi từ ngắt.
+   - Handler của user **tuyệt đối không chạy trong interrupt context**: `kkill()` chỉ bật bit pending và đánh thức tiến trình. Handler sẽ được thực thi khi tiến trình tiền cảnh được lập lịch và quay về user qua `prepare_return()`.
+   - Thứ tự khóa tuân thủ: `cons.lock -> p->lock` (nhất quán với `consoleread`).

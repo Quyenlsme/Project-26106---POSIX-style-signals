@@ -148,47 +148,50 @@ sig_deliver(void)
   if (p->killed)
     kexit(-1);
 
-  acquire(&p->lock);
-  // Calculate signals ready for delivery:
-  // pending & supported & not blocked (except unblockable signals like SIGKILL)
-  sigset_t effective_blocked =
-    (p->blocked_signals & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
-  sigset_t ready = p->pending_signals & SUPPORTED_MASK & ~effective_blocked;
-  if (ready == 0) {
-    release(&p->lock);
-    return;
-  }
-
-  // Select signal with the lowest signal number
-  int sig = 0;
-  for (int i = 1; i < NSIG; i++) {
-    if (ready & (1U << i)) {
-      sig = i;
-      break;
+  for (;;) {
+    acquire(&p->lock);
+    // Calculate signals ready for delivery:
+    // pending & supported & not blocked (except unblockable signals like SIGKILL)
+    sigset_t effective_blocked =
+      (p->blocked_signals & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
+    sigset_t ready = p->pending_signals & SUPPORTED_MASK & ~effective_blocked;
+    if (ready == 0) {
+      release(&p->lock);
+      return;
     }
-  }
 
-  // Claim signal: clear pending bit under p->lock
-  p->pending_signals &= ~(1U << sig);
-  release(&p->lock);
+    // Select signal with the lowest signal number
+    int sig = 0;
+    for (int i = 1; i < NSIG; i++) {
+      if (ready & (1U << i)) {
+        sig = i;
+        break;
+      }
+    }
 
-  // Read action (private to process, no lock needed)
-  struct sigaction act = p->sig_actions[sig];
+    // Claim signal: clear pending bit under p->lock
+    p->pending_signals &= ~(1U << sig);
+    release(&p->lock);
 
-  // SIG_IGN: ignore signal
-  if (act.sa_handler == SIG_IGN) {
+    // Read action (private to process, no lock needed)
+    struct sigaction act = p->sig_actions[sig];
+
+    // SIG_IGN: ignore signal, continue loop to check next signal
+    if (act.sa_handler == SIG_IGN) {
+      continue;
+    }
+
+    // SIG_DFL: default action terminates process with -1 (D5)
+    if (act.sa_handler == SIG_DFL) {
+      kexit(-1);
+    }
+
+    // User handler: setup frame on user stack
+    if (sig_setup_frame(sig, &act) < 0) {
+      // Bad stack frame, memory fault -> terminate process safely
+      kexit(-1);
+    }
     return;
-  }
-
-  // SIG_DFL: default action terminates process with -1 (D5)
-  if (act.sa_handler == SIG_DFL) {
-    kexit(-1);
-  }
-
-  // User handler: setup frame on user stack
-  if (sig_setup_frame(sig, &act) < 0) {
-    // Bad stack frame, memory fault -> terminate process safely
-    kexit(-1);
   }
 }
 

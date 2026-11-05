@@ -629,6 +629,7 @@ sig_send(struct proc *p, int sig)
   if (sig <= 0 || sig >= NSIG)
     return -1;
   p->pending_signals |= (1U << sig);
+  p->chan = 0;
   if (p->state == SLEEPING)
     p->state = RUNNABLE;
   return 0;
@@ -650,6 +651,7 @@ kkill(int pid, int sig)
     if (p->pid == pid && p->state != UNUSED && p->state != ZOMBIE) {
       if (sig == SIGKILL) {
         p->killed = 1;
+        p->chan = 0;
         if (p->state == SLEEPING) {
           // Wake process from sleep().
           p->state = RUNNABLE;
