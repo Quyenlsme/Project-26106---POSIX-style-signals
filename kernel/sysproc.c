@@ -80,7 +80,8 @@ sys_pause(void)
       release(&tickslock);
       return -1;
     }
-    sleep_prepare(&ticks);
+    if (sleep_prepare_intr(&ticks))
+      continue;
     release(&tickslock);
     sleep();
     acquire(&tickslock);

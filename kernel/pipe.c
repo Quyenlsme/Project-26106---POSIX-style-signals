@@ -87,7 +87,8 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
     }
     if (pi->nwrite == pi->nread + PIPESIZE) { //DOC: pipewrite-full
       wakeup(&pi->nread);
-      sleep_prepare(&pi->nwrite);
+      if (sleep_prepare_intr(&pi->nwrite))
+        continue;
       release(&pi->lock);
       sleep();
       acquire(&pi->lock);
@@ -121,7 +122,8 @@ piperead(struct pipe *pi, uint64 addr, int n)
       release(&pi->lock);
       return -1;
     }
-    sleep_prepare(&pi->nread); //DOC: piperead-sleep
+    if (sleep_prepare_intr(&pi->nread)) //DOC: piperead-sleep
+      continue;
     release(&pi->lock);
     sleep();
     acquire(&pi->lock);

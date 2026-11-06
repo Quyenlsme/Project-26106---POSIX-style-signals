@@ -439,7 +439,8 @@ kwait(uint64 addr)
     }
 
     // Wait for a child to exit.
-    sleep_prepare(p); //DOC: wait-sleep
+    if (sleep_prepare_intr(p)) //DOC: wait-sleep
+      continue;
     release(&wait_lock);
     sleep();
     acquire(&wait_lock);
@@ -676,27 +677,52 @@ setkilled(struct proc *p)
   release(&p->lock);
 }
 
-// Tra ve 1 neu tien trinh can thoat khoi vong sleep dang cho:
-// da bi killed, hoac co signal pending, khong bi chan va khong bi SIG_IGN.
+// Trả 1 nếu p cần thoát khỏi vòng chờ: đã bị killed, hoặc có signal
+// pending, không bị chặn và không bị SIG_IGN. Gọi khi đang giữ p->lock.
+static int
+sig_deliverable_locked(struct proc *p)
+{
+  if (p->killed)
+    return 1;
+  sigset_t blocked = (p->blocked_signals & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
+  sigset_t ready = p->pending_signals & SUPPORTED_MASK & ~blocked;
+  for (int i = 1; i < NSIG; i++) {
+    if ((ready & (1U << i)) && p->sig_actions[i].sa_handler != SIG_IGN)
+      return 1;
+  }
+  return 0;
+}
+
+// Dùng thay killed() trong các vòng sleep để signal thường (SIGTERM,
+// SIGUSR1...) có thể ngắt syscall đang chờ; signal sẽ được giao ở
+// sig_deliver() trước khi về user.
 int
 sig_interrupted(struct proc *p)
 {
-  int r = 0;
+  int r;
 
   acquire(&p->lock);
-  if (p->killed) {
-    r = 1;
-  } else {
-    sigset_t blocked =
-      (p->blocked_signals & SUPPORTED_MASK) & ~UNBLOCKABLE_MASK;
-    sigset_t ready = p->pending_signals & SUPPORTED_MASK & ~blocked;
-    for (int i = 1; i < NSIG; i++) {
-      if ((ready & (1U << i)) && p->sig_actions[i].sa_handler != SIG_IGN) {
-        r = 1;
-        break;
-      }
-    }
-  }
+  r = sig_deliverable_locked(p);
+  release(&p->lock);
+  return r;
+}
+
+// Giống sleep_prepare(chan) nhưng kiểm tra signal và đặt p->chan trong
+// CÙNG một lần giữ p->lock. Trả 1 (không đặt chan) nếu đã có signal cần
+// giao. Đóng khe race: signal đến giữa lúc kiểm tra sig_interrupted() và
+// lúc sleep_prepare() sẽ không bị mất (lost wakeup).
+int
+sleep_prepare_intr(void *chan)
+{
+  struct proc *p = myproc();
+  int r;
+
+  if (chan == 0)
+    panic("sleep_prepare_intr: zero chan");
+  acquire(&p->lock);
+  r = sig_deliverable_locked(p);
+  if (!r)
+    p->chan = chan;
   release(&p->lock);
   return r;
 }
