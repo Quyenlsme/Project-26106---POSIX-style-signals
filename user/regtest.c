@@ -87,24 +87,24 @@ main(int argc, char *argv[])
   // REG-02: Kiem tra bao toan thanh ghi s1-s11
   handler_called = 0;
 
-  register uint64 r1  asm("s1")  = 0x111;
-  register uint64 r2  asm("s2")  = 0x222;
-  register uint64 r3  asm("s3")  = 0x333;
-  register uint64 r4  asm("s4")  = 0x444;
-  register uint64 r5  asm("s5")  = 0x555;
-  register uint64 r6  asm("s6")  = 0x666;
-  register uint64 r7  asm("s7")  = 0x777;
-  register uint64 r8  asm("s8")  = 0x888;
-  register uint64 r9  asm("s9")  = 0x999;
+  register uint64 r1 asm("s1") = 0x111;
+  register uint64 r2 asm("s2") = 0x222;
+  register uint64 r3 asm("s3") = 0x333;
+  register uint64 r4 asm("s4") = 0x444;
+  register uint64 r5 asm("s5") = 0x555;
+  register uint64 r6 asm("s6") = 0x666;
+  register uint64 r7 asm("s7") = 0x777;
+  register uint64 r8 asm("s8") = 0x888;
+  register uint64 r9 asm("s9") = 0x999;
   register uint64 r10 asm("s10") = 0xaaa;
   register uint64 r11 asm("s11") = 0xbbb;
 
   // Dua cac gia tri vao cac thanh ghi can kiem tra
-  asm volatile("" :
-    : "r"(r1), "r"(r2), "r"(r3), "r"(r4),
-      "r"(r5), "r"(r6), "r"(r7), "r"(r8),
-      "r"(r9), "r"(r10), "r"(r11)
-    : "memory");
+  asm volatile(""
+               :
+               : "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5), "r"(r6), "r"(r7),
+                 "r"(r8), "r"(r9), "r"(r10), "r"(r11)
+               : "memory");
 
   // Gui signal de kernel thuc hien signal delivery
   if (kill(getpid(), SIGUSR1) < 0) {
@@ -113,31 +113,29 @@ main(int argc, char *argv[])
   }
 
   // Doc lai gia tri cac thanh ghi sau khi handler ket thuc
-  asm volatile("" :
-    "=r"(r1), "=r"(r2), "=r"(r3), "=r"(r4),
-    "=r"(r5), "=r"(r6), "=r"(r7), "=r"(r8),
-    "=r"(r9), "=r"(r10), "=r"(r11)
-    :
-    : "memory");
+  asm volatile(""
+               : "=r"(r1), "=r"(r2), "=r"(r3), "=r"(r4), "=r"(r5), "=r"(r6),
+                 "=r"(r7), "=r"(r8), "=r"(r9), "=r"(r10), "=r"(r11)
+               :
+               : "memory");
 
   if (handler_called != 1) {
     printf("REG-02 FAIL: handler_called = %d\n", handler_called);
     exit(1);
   }
 
-  if (r1 != 0x111 || r2 != 0x222 || r3 != 0x333 ||
-      r4 != 0x444 || r5 != 0x555 || r6 != 0x666 ||
-      r7 != 0x777 || r8 != 0x888 || r9 != 0x999 ||
+  if (r1 != 0x111 || r2 != 0x222 || r3 != 0x333 || r4 != 0x444 || r5 != 0x555 ||
+      r6 != 0x666 || r7 != 0x777 || r8 != 0x888 || r9 != 0x999 ||
       r10 != 0xaaa || r11 != 0xbbb) {
     printf("REG-02 FAIL: Register values were not preserved\n");
-    printf("s1-s11: %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx\n",
-           r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11);
+    printf("s1-s11: %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx\n", r1, r2, r3,
+           r4, r5, r6, r7, r8, r9, r10, r11);
     exit(1);
   }
 
   printf("REG-02 PASS: s1-s11 preserved after signal\n");
 
-    // REG-03: Kiem tra khoi phuc stack pointer sau sigreturn
+  // REG-03: Kiem tra khoi phuc stack pointer sau sigreturn
   handler_called = 0;
 
   uint64 sp_before;
@@ -167,7 +165,7 @@ main(int argc, char *argv[])
 
   printf("REG-03 PASS: stack pointer restored after sigreturn\n");
 
-    // REG-04: Kiem tra signal bi block
+  // REG-04: Kiem tra signal bi block
   handler_called = 0;
 
   unsigned int mask = (1U << SIGUSR1);
@@ -204,7 +202,7 @@ main(int argc, char *argv[])
 
   printf("REG-04 PASS: blocked signal delivered after unblock\n");
 
-    // REG-05: Kiem tra khoi phuc signal mask sau handler
+  // REG-05: Kiem tra khoi phuc signal mask sau handler
   handler_called = 0;
   handler_mask = 0;
 
@@ -240,8 +238,7 @@ main(int argc, char *argv[])
   }
 
   // Kiem tra mask trong handler
-  if (!(handler_mask & (1U << SIGUSR1)) ||
-      !(handler_mask & (1U << SIGUSR2))) {
+  if (!(handler_mask & (1U << SIGUSR1)) || !(handler_mask & (1U << SIGUSR2))) {
     printf("REG-05 FAIL: handler mask is incorrect\n");
     printf("Handler mask: %x\n", handler_mask);
     exit(1);
@@ -254,8 +251,7 @@ main(int argc, char *argv[])
   }
 
   // SIGUSR2 phai van bi block, SIGUSR1 phai duoc unblock
-  if (!(current_mask & (1U << SIGUSR2)) ||
-      (current_mask & (1U << SIGUSR1))) {
+  if (!(current_mask & (1U << SIGUSR2)) || (current_mask & (1U << SIGUSR1))) {
     printf("REG-05 FAIL: signal mask was not restored\n");
     printf("Current mask: %x\n", current_mask);
     exit(1);
@@ -301,20 +297,17 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-  if (nested_count != 3 ||
-      nested_order[0] != 1 ||
-      nested_order[1] != 2 ||
+  if (nested_count != 3 || nested_order[0] != 1 || nested_order[1] != 2 ||
       nested_order[2] != 3) {
     printf("REG-06 FAIL: incorrect nested signal order\n");
-    printf("Order: %d %d %d, count = %d\n",
-           nested_order[0], nested_order[1],
+    printf("Order: %d %d %d, count = %d\n", nested_order[0], nested_order[1],
            nested_order[2], nested_count);
     exit(1);
   }
 
   printf("REG-06 PASS: nested signal handler executed correctly\n");
 
-    // REG-07: Kiem tra SIG_IGN
+  // REG-07: Kiem tra SIG_IGN
   handler_called = 0;
 
   act.sa_handler = SIG_IGN;
@@ -340,8 +333,8 @@ main(int argc, char *argv[])
   }
 
   printf("REG-07 PASS: SIG_IGN ignored the signal\n");
-  
-    // REG-08: Kiem tra SIG_DFL
+
+  // REG-08: Kiem tra SIG_DFL
   int pid;
   int status = 0;
 
@@ -382,7 +375,7 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-    // REG-09: Kiem tra khong the block SIGKILL
+  // REG-09: Kiem tra khong the block SIGKILL
   unsigned int kill_mask = (1U << SIGKILL);
   unsigned int check_mask = 0;
 
@@ -407,7 +400,7 @@ main(int argc, char *argv[])
 
   printf("REG-09 PASS: SIGKILL cannot be blocked\n");
 
-    // REG-10: Kiem tra sigprocmask voi NULL
+  // REG-10: Kiem tra sigprocmask voi NULL
   unsigned int mask_before = 0;
   unsigned int mask_after = 0;
 
@@ -448,7 +441,7 @@ main(int argc, char *argv[])
   // Don dep
   sigprocmask(SIG_UNBLOCK, &test_mask, 0);
 
-    // REG-11: Test sigaction filters unsupported signals in sa_mask
+  // REG-11: Test sigaction filters unsupported signals in sa_mask
   {
     struct sigaction act, oldact, checkact;
 
@@ -474,7 +467,7 @@ main(int argc, char *argv[])
     sigaction(SIGUSR1, &oldact, 0);
   }
 
-    // REG-12: Test sigaction rejects invalid signals
+  // REG-12: Test sigaction rejects invalid signals
   {
     int pass = 1;
 
@@ -496,7 +489,7 @@ main(int argc, char *argv[])
       printf("REG-12 FAIL: sigaction accepted an invalid signal\n");
   }
 
-    // REG-13: Test sigaction rejects unsupported flags
+  // REG-13: Test sigaction rejects unsupported flags
   {
     struct sigaction act;
 
@@ -512,7 +505,7 @@ main(int argc, char *argv[])
     }
   }
 
-    // REG-14: Test sigaction requires sa_restorer
+  // REG-14: Test sigaction requires sa_restorer
   {
     struct sigaction act;
 
@@ -528,7 +521,7 @@ main(int argc, char *argv[])
     }
   }
 
-    // REG-15: Test sigaction returns old action
+  // REG-15: Test sigaction returns old action
   {
     struct sigaction act1, act2, oldact;
 
@@ -556,8 +549,8 @@ main(int argc, char *argv[])
     // Restore default action
     sigaction(SIGUSR1, &act1, 0);
   }
-  
-    // REG-16: Test sigaction rejects invalid user address
+
+  // REG-16: Test sigaction rejects invalid user address
   {
     if (sigaction(SIGUSR1, (struct sigaction *)-1, 0) == -1) {
       printf("REG-16 PASS: sigaction rejects invalid act address\n");
@@ -566,7 +559,7 @@ main(int argc, char *argv[])
     }
   }
 
-    // REG-17: Test sigaction rejects invalid oldact address
+  // REG-17: Test sigaction rejects invalid oldact address
   {
     if (sigaction(SIGUSR1, 0, (struct sigaction *)-1) == -1) {
       printf("REG-17 PASS: sigaction rejects invalid oldact address\n");
@@ -575,7 +568,7 @@ main(int argc, char *argv[])
     }
   }
 
-    // REG-18: Test sigprocmask rejects invalid how
+  // REG-18: Test sigprocmask rejects invalid how
   {
     sigset_t set = (1U << SIGUSR2);
 
@@ -587,7 +580,7 @@ main(int argc, char *argv[])
     }
   }
 
-    // REG-19: Test invalid how when set is NULL
+  // REG-19: Test invalid how when set is NULL
   {
     sigset_t before, after;
 
@@ -609,10 +602,8 @@ main(int argc, char *argv[])
 
     int result = sigprocmask(SIG_SETMASK, &set, &oldset);
 
-    if (result == 0 &&
-        sigprocmask(SIG_BLOCK, 0, &newset) == 0 &&
-        !(newset & (1U << SIGKILL)) &&
-        (newset & (1U << SIGUSR1))) {
+    if (result == 0 && sigprocmask(SIG_BLOCK, 0, &newset) == 0 &&
+        !(newset & (1U << SIGKILL)) && (newset & (1U << SIGUSR1))) {
       printf("REG-20 PASS: SIGKILL cannot be blocked using SIG_SETMASK\n");
     } else {
       printf("REG-20 FAIL: SIG_SETMASK did not sanitize SIGKILL\n");
@@ -622,7 +613,7 @@ main(int argc, char *argv[])
     sigprocmask(SIG_SETMASK, &oldset, 0);
   }
 
-    // REG-21: Test SIG_UNBLOCK
+  // REG-21: Test SIG_UNBLOCK
   {
     sigset_t set, oldset, newset;
 
@@ -638,8 +629,7 @@ main(int argc, char *argv[])
     // Read current mask
     sigprocmask(SIG_BLOCK, 0, &newset);
 
-    if (result == 0 &&
-        !(newset & (1U << SIGUSR1)) &&
+    if (result == 0 && !(newset & (1U << SIGUSR1)) &&
         (newset & (1U << SIGUSR2))) {
       printf("REG-21 PASS: SIG_UNBLOCK only unblocks requested signal\n");
     } else {
@@ -650,7 +640,7 @@ main(int argc, char *argv[])
     sigprocmask(SIG_SETMASK, &oldset, 0);
   }
 
-    // REG-22: Test sigaction with both act and oldact
+  // REG-22: Test sigaction with both act and oldact
   {
     struct sigaction old_action, new_action, returned_action;
 
@@ -670,8 +660,7 @@ main(int argc, char *argv[])
     // Read current action
     sigaction(SIGUSR1, 0, &returned_action);
 
-    if (result == 0 &&
-        old_action.sa_handler == SIG_IGN &&
+    if (result == 0 && old_action.sa_handler == SIG_IGN &&
         returned_action.sa_handler == SIG_DFL) {
       printf("REG-22 PASS: sigaction updates action and returns old action\n");
     } else {
@@ -682,7 +671,7 @@ main(int argc, char *argv[])
     sigaction(SIGUSR1, &old_action, 0);
   }
 
-    // REG-23: SIG_IGN does not require sa_restorer
+  // REG-23: SIG_IGN does not require sa_restorer
   {
     struct sigaction old_action, new_action, current_action;
 
@@ -697,8 +686,7 @@ main(int argc, char *argv[])
 
     sigaction(SIGUSR1, 0, &current_action);
 
-    if (result == 0 &&
-        current_action.sa_handler == SIG_IGN &&
+    if (result == 0 && current_action.sa_handler == SIG_IGN &&
         current_action.sa_restorer == 0) {
       printf("REG-23 PASS: SIG_IGN does not require sa_restorer\n");
     } else {
@@ -707,8 +695,8 @@ main(int argc, char *argv[])
 
     sigaction(SIGUSR1, &old_action, 0);
   }
-  
-    // REG-24: Verify multiple pending signals are delivered
+
+  // REG-24: Verify multiple pending signals are delivered
   {
     sigset_t set, oldset, newset;
     struct sigaction old_usr1, old_usr2, action;
