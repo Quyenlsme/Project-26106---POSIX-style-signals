@@ -1,4 +1,8 @@
 
+// user/regtest.c — Bộ kiểm thử Signal Handler & Khôi phục Context cho xv6-riscv (REG-01..REG-33)
+// Đề tài 26106 — POSIX-style signals trên xv6-riscv
+// Người viết: Trần Việt Hưng — Tuần 3 (Hoàn thiện HD-01..HD-10)
+
 #include "kernel/types.h"
 #include "kernel/signal.h"
 #include "user/user.h"
@@ -59,6 +63,63 @@ test_handler(int sig)
 {
   if (sig == SIGUSR1 || sig == SIGUSR2)
     handler_called++;
+}
+
+// Biến và handler phục vụ REG-29 (HD-04: Bảo toàn a0)
+static volatile int reg29_ran = 0;
+void
+reg29_handler(int sig)
+{
+  reg29_ran = 1;
+}
+
+// Biến và handler phục vụ REG-30 (HD-08: Chống đệ quy cùng signal)
+static volatile int reg30_count = 0;
+static volatile int reg30_nested = 0;
+void
+reg30_handler(int sig)
+{
+  reg30_count++;
+  if (reg30_count == 1) {
+    kill(getpid(), SIGUSR1);
+    if (reg30_count != 1) {
+      reg30_nested = 1;
+    }
+  }
+}
+
+// Biến và handler phục vụ REG-32 (HD-10: Căn lề stack 16-byte)
+static volatile uint64 reg32_sp = 1;
+void
+reg32_handler(int sig)
+{
+  asm volatile("mv %0, sp" : "=r"(reg32_sp));
+}
+
+// Biến và handler phục vụ REG-33 (HD-03: Caller-saved registers t0-t6, a1-a7)
+static volatile int reg33_ran = 0;
+void
+reg33_clobber_handler(int sig)
+{
+  reg33_ran = 1;
+  asm volatile(
+    "li t0, 0xdead\n"
+    "li t1, 0xdead\n"
+    "li t2, 0xdead\n"
+    "li t3, 0xdead\n"
+    "li t4, 0xdead\n"
+    "li t5, 0xdead\n"
+    "li t6, 0xdead\n"
+    "li a1, 0xdead\n"
+    "li a2, 0xdead\n"
+    "li a3, 0xdead\n"
+    "li a4, 0xdead\n"
+    "li a5, 0xdead\n"
+    "li a6, 0xdead\n"
+    "li a7, 0xdead\n"
+    ::: "t0", "t1", "t2", "t3", "t4", "t5", "t6",
+        "a1", "a2", "a3", "a4", "a5", "a6", "a7"
+  );
 }
 
 int
@@ -1036,6 +1097,203 @@ main(int argc, char *argv[])
         "REG-28 PASS: Signal actions and mask handled correctly after exec\n");
     } else {
       printf("REG-28 FAIL: Signal state after exec is incorrect\n");
+      exit(1);
+    }
+  }
+
+  // REG-29: HD-04 - Preserve a0 across sigreturn (not overwritten by return value)
+  {
+    struct sigaction act, oldact;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = reg29_handler;
+    act.sa_restorer = sigrestorer;
+    sigaction(SIGALRM, &act, &oldact);
+
+    reg29_ran = 0;
+    alarm(2); // Đặt hẹn giờ ~2 ticks
+
+    uint64 a0_val = 0;
+    uint64 magic_a0 = 0x12345678ULL;
+
+    asm volatile(
+      "mv a0, %2\n"
+      "1:\n"
+      "lw t0, 0(%1)\n"
+      "beqz t0, 1b\n"
+      "sd a0, 0(%0)\n"
+      :
+      : "r"(&a0_val), "r"(&reg29_ran), "r"(magic_a0)
+      : "t0", "memory"
+    );
+
+    alarm(0);
+    sigaction(SIGALRM, &oldact, 0);
+
+    if (reg29_ran == 1 && a0_val == magic_a0) {
+      printf("REG-29 PASS: a0 preserved across sigreturn (HD-04)\n");
+    } else {
+      printf("REG-29 FAIL: a0 corrupted! expected 0x%lx, got 0x%lx (ran=%d)\n",
+             magic_a0, a0_val, reg29_ran);
+      exit(1);
+    }
+  }
+
+  // REG-30: HD-08 - Prevent recursive handler re-entry for same signal
+  {
+    struct sigaction act, oldact;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = reg30_handler;
+    act.sa_mask = 0;
+    act.sa_flags = 0;
+    act.sa_restorer = sigrestorer;
+    sigaction(SIGUSR1, &act, &oldact);
+
+    reg30_count = 0;
+    reg30_nested = 0;
+
+    if (kill(getpid(), SIGUSR1) < 0) {
+      printf("REG-30 FAIL: kill\n");
+      exit(1);
+    }
+
+    sigaction(SIGUSR1, &oldact, 0);
+
+    if (reg30_nested == 0 && reg30_count == 2) {
+      printf("REG-30 PASS: Recursive re-entry prevented, pending delivered after sigreturn (HD-08)\n");
+    } else {
+      printf("REG-30 FAIL: count=%d, nested=%d\n", reg30_count, reg30_nested);
+      exit(1);
+    }
+  }
+
+  // REG-31: HD-09 - Bad stack frame handled safely by kernel without panic
+  {
+    int pid = fork();
+    if (pid < 0) {
+      printf("REG-31 FAIL: fork\n");
+      exit(1);
+    }
+
+    if (pid == 0) {
+      // Trong tiến trình con: Cố tình đặt sp không căn lề (sp = 1) rồi gọi sigreturn
+      asm volatile(
+        "li sp, 1\n"
+        "li a7, 24\n"     // 24 = SYS_sigreturn trong syscall.h
+        "ecall\n"
+      );
+      // Nếu kernel không kill tiến trình con, tiến trình con thoát mã 0
+      exit(0);
+    }
+
+    int status = 0;
+    int waited = wait(&status);
+
+    if (waited == pid && status != 0) {
+      printf("REG-31 PASS: Bad stack frame killed process safely without panic (HD-09)\n");
+    } else {
+      printf("REG-31 FAIL: child did not exit with error, status=%d\n", status);
+      exit(1);
+    }
+  }
+
+  // REG-32: HD-10 - Stack pointer 16-byte alignment in handler
+  {
+    struct sigaction act, oldact;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = reg32_handler;
+    act.sa_restorer = sigrestorer;
+    sigaction(SIGUSR1, &act, &oldact);
+
+    reg32_sp = 1;
+
+    if (kill(getpid(), SIGUSR1) < 0) {
+      printf("REG-32 FAIL: kill\n");
+      exit(1);
+    }
+
+    sigaction(SIGUSR1, &oldact, 0);
+
+    if ((reg32_sp & 0xF) == 0) {
+      printf("REG-32 PASS: Stack pointer is 16-byte aligned (sp=0x%lx) (HD-10)\n", reg32_sp);
+    } else {
+      printf("REG-32 FAIL: Stack pointer unaligned: 0x%lx\n", reg32_sp);
+      exit(1);
+    }
+  }
+
+  // REG-33: HD-03 - Caller-saved registers (t0-t6, a1-a7) preserved across sigreturn
+  {
+    struct sigaction act, oldact;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = reg33_clobber_handler;
+    act.sa_restorer = sigrestorer;
+    sigaction(SIGALRM, &act, &oldact);
+
+    reg33_ran = 0;
+    alarm(2); // sau ~2 ticks SIGALRM sẽ tới
+
+    uint64 out_regs[14];
+    memset(out_regs, 0, sizeof(out_regs));
+
+    asm volatile(
+      // 1. Nạp magic values vào caller-saved t0-t6, a1-a7
+      "li t0, 0x1000\n"
+      "li t1, 0x1001\n"
+      "li t2, 0x1002\n"
+      "li t3, 0x1003\n"
+      "li t4, 0x1004\n"
+      "li t5, 0x1005\n"
+      "li t6, 0x1006\n"
+      "li a1, 0x2001\n"
+      "li a2, 0x2002\n"
+      "li a3, 0x2003\n"
+      "li a4, 0x2004\n"
+      "li a5, 0x2005\n"
+      "li a6, 0x2006\n"
+      "li a7, 0x2007\n"
+      // 2. Chờ handler chạy xong qua biến reg33_ran (dùng s1 chứa địa chỉ, s2 làm biến đọc)
+      "mv s1, %1\n"
+      "1:\n"
+      "lw s2, 0(s1)\n"
+      "beqz s2, 1b\n"
+      // 3. Handler đã chạy và sigreturn đã khôi phục -> lưu ra mảng bộ nhớ
+      "sd t0, 0(%0)\n"
+      "sd t1, 8(%0)\n"
+      "sd t2, 16(%0)\n"
+      "sd t3, 24(%0)\n"
+      "sd t4, 32(%0)\n"
+      "sd t5, 40(%0)\n"
+      "sd t6, 48(%0)\n"
+      "sd a1, 56(%0)\n"
+      "sd a2, 64(%0)\n"
+      "sd a3, 72(%0)\n"
+      "sd a4, 80(%0)\n"
+      "sd a5, 88(%0)\n"
+      "sd a6, 96(%0)\n"
+      "sd a7, 104(%0)\n"
+      :
+      : "r"(out_regs), "r"(&reg33_ran)
+      : "s1", "s2", "memory"
+    );
+
+    alarm(0);
+    sigaction(SIGALRM, &oldact, 0);
+
+    if (reg33_ran == 1 &&
+        out_regs[0] == 0x1000 && out_regs[1] == 0x1001 && out_regs[2] == 0x1002 &&
+        out_regs[3] == 0x1003 && out_regs[4] == 0x1004 && out_regs[5] == 0x1005 &&
+        out_regs[6] == 0x1006 && out_regs[7] == 0x2001 && out_regs[8] == 0x2002 &&
+        out_regs[9] == 0x2003 && out_regs[10] == 0x2004 && out_regs[11] == 0x2005 &&
+        out_regs[12] == 0x2006 && out_regs[13] == 0x2007) {
+      printf("REG-33 PASS: Caller-saved registers t0-t6, a1-a7 preserved across sigreturn (HD-03)\n");
+    } else {
+      printf("REG-33 FAIL: Caller-saved registers corrupted!\n");
+      printf("  t0-t6: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
+             out_regs[0], out_regs[1], out_regs[2], out_regs[3],
+             out_regs[4], out_regs[5], out_regs[6]);
+      printf("  a1-a7: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
+             out_regs[7], out_regs[8], out_regs[9], out_regs[10],
+             out_regs[11], out_regs[12], out_regs[13]);
       exit(1);
     }
   }

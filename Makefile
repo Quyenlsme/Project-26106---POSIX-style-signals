@@ -157,6 +157,7 @@ UPROGS=\
 	$U/_alarm_demo\
 	$U/_mask_demo\
 	$U/_regtest
+
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
 
