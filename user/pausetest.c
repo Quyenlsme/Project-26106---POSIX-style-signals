@@ -1,7 +1,5 @@
 // user/pausetest.c — Kiểm thử semantics pause(n) khi có signal (PA-01..PA-06)
-// Dự án 26106 — POSIX-style signals trên xv6-riscv
-// Người viết: Nguyễn Trung Kiên — Tuần 3
-//
+
 // pause(n) là syscall có sẵn của xv6 (ngủ n ticks). Sau tuần 2, vòng chờ
 // trong sys_pause() gọi sig_interrupted(), nên pause trả -1 khi có signal
 // deliverable (không bị block, không SIG_IGN).
