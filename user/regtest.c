@@ -4,6 +4,15 @@
 #include "user/user.h"
 
 int handler_called = 0;
+int fork_handler_called = 0;
+
+void
+fork_test_handler(int sig)
+{
+  if (sig == SIGUSR1)
+    fork_handler_called++;
+}
+
 unsigned int handler_mask = 0;
 // Bien va ham phuc vu REG-06
 int nested_order[3];
@@ -56,6 +65,27 @@ int
 main(int argc, char *argv[])
 {
   struct sigaction act;
+  // REG-28 child mode: verify signal state after exec
+  if (argc == 2 && strcmp(argv[1], "exec-child") == 0) {
+    struct sigaction usr1_action, usr2_action;
+    sigset_t current_mask = 0;
+
+    if (sigaction(SIGUSR1, 0, &usr1_action) < 0)
+      exit(1);
+
+    if (sigaction(SIGUSR2, 0, &usr2_action) < 0)
+      exit(1);
+
+    if (sigprocmask(SIG_BLOCK, 0, &current_mask) < 0)
+      exit(1);
+
+    if (usr1_action.sa_handler == SIG_DFL &&
+        usr2_action.sa_handler == SIG_IGN && (current_mask & (1U << SIGUSR2))) {
+      exit(0);
+    }
+
+    exit(1);
+  }
 
   printf("\n===== SIGNAL REGISTER TEST =====\n");
 
@@ -744,6 +774,270 @@ main(int argc, char *argv[])
     sigaction(SIGUSR1, &old_usr1, 0);
     sigaction(SIGUSR2, &old_usr2, 0);
     sigprocmask(SIG_SETMASK, &oldset, 0);
+  }
+
+  // REG-25: Verify signal handler is inherited after fork
+  {
+    struct sigaction old_action, action;
+    int status;
+    int pid, waited;
+
+    sigaction(SIGUSR1, 0, &old_action);
+
+    action.sa_handler = fork_test_handler;
+    action.sa_mask = 0;
+    action.sa_flags = 0;
+    action.sa_restorer = sigrestorer;
+
+    fork_handler_called = 0;
+
+    if (sigaction(SIGUSR1, &action, 0) < 0) {
+      printf("REG-25 FAIL: sigaction\n");
+      exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+      printf("REG-25 FAIL: fork\n");
+      sigaction(SIGUSR1, &old_action, 0);
+      exit(1);
+    }
+
+    if (pid == 0) {
+      fork_handler_called = 0;
+
+      if (kill(getpid(), SIGUSR1) < 0)
+        exit(1);
+
+      if (fork_handler_called == 1)
+        exit(0);
+
+      exit(1);
+    }
+
+    waited = wait(&status);
+
+    sigaction(SIGUSR1, &old_action, 0);
+
+    if (waited == pid && status == 0) {
+      printf("REG-25 PASS: Child inherited signal handler after fork\n");
+    } else {
+      printf("REG-25 FAIL: Child did not inherit signal handler\n");
+      exit(1);
+    }
+  }
+
+  // REG-26: Child signal action changes must not affect parent
+  {
+    struct sigaction old_action, action, current_action;
+    int pid, waited, status;
+
+    sigaction(SIGUSR1, 0, &old_action);
+
+    action.sa_handler = fork_test_handler;
+    action.sa_mask = 0;
+    action.sa_flags = 0;
+    action.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGUSR1, &action, 0) < 0) {
+      printf("REG-26 FAIL: parent sigaction\n");
+      exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+      printf("REG-26 FAIL: fork\n");
+      sigaction(SIGUSR1, &old_action, 0);
+      exit(1);
+    }
+
+    if (pid == 0) {
+      action.sa_handler = SIG_IGN;
+      action.sa_mask = 0;
+      action.sa_flags = 0;
+      action.sa_restorer = 0;
+
+      if (sigaction(SIGUSR1, &action, 0) < 0)
+        exit(1);
+
+      sigaction(SIGUSR1, 0, &current_action);
+
+      if (current_action.sa_handler == SIG_IGN)
+        exit(0);
+
+      exit(1);
+    }
+
+    waited = wait(&status);
+
+    sigaction(SIGUSR1, 0, &current_action);
+
+    sigaction(SIGUSR1, &old_action, 0);
+
+    if (waited == pid && status == 0 &&
+        current_action.sa_handler == fork_test_handler) {
+      printf("REG-26 PASS: Child signal action change did not affect parent\n");
+    } else {
+      printf("REG-26 FAIL: Parent signal action was modified\n");
+      exit(1);
+    }
+  }
+
+  // REG-27: Pending signals must not be inherited after fork
+  {
+    struct sigaction old_action, action;
+    sigset_t set, oldset;
+    int before = handler_called;
+    int pid, waited, status;
+
+    sigaction(SIGUSR1, 0, &old_action);
+
+    action.sa_handler = test_handler;
+    action.sa_mask = 0;
+    action.sa_flags = 0;
+    action.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGUSR1, &action, 0) < 0) {
+      printf("REG-27 FAIL: sigaction\n");
+      exit(1);
+    }
+
+    set = (1U << SIGUSR1);
+
+    if (sigprocmask(SIG_BLOCK, &set, &oldset) < 0) {
+      printf("REG-27 FAIL: block signal\n");
+      sigaction(SIGUSR1, &old_action, 0);
+      exit(1);
+    }
+
+    // Queue SIGUSR1 in parent while it is blocked.
+    if (kill(getpid(), SIGUSR1) < 0) {
+      printf("REG-27 FAIL: kill\n");
+      sigprocmask(SIG_SETMASK, &oldset, 0);
+      sigaction(SIGUSR1, &old_action, 0);
+      exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+      printf("REG-27 FAIL: fork\n");
+      sigprocmask(SIG_SETMASK, &oldset, 0);
+      sigaction(SIGUSR1, &old_action, 0);
+      exit(1);
+    }
+
+    if (pid == 0) {
+      // Child must not receive the parent's pending SIGUSR1.
+      if (sigprocmask(SIG_UNBLOCK, &set, 0) < 0)
+        exit(1);
+
+      getpid();
+
+      if (handler_called == before)
+        exit(0);
+
+      exit(1);
+    }
+
+    waited = wait(&status);
+
+    // Parent must still have its own pending SIGUSR1.
+    if (sigprocmask(SIG_UNBLOCK, &set, 0) < 0) {
+      printf("REG-27 FAIL: parent unblock\n");
+      sigaction(SIGUSR1, &old_action, 0);
+      exit(1);
+    }
+
+    getpid();
+
+    sigaction(SIGUSR1, &old_action, 0);
+    sigprocmask(SIG_SETMASK, &oldset, 0);
+
+    if (waited == pid && status == 0 && handler_called == before + 1) {
+      printf("REG-27 PASS: Pending signal was not inherited after fork\n");
+    } else {
+      printf("REG-27 FAIL: Pending signal inheritance is incorrect\n");
+      exit(1);
+    }
+  }
+
+  // REG-28: Verify signal disposition and mask after exec
+  {
+    struct sigaction old_usr1, old_usr2, action;
+    sigset_t set, oldset;
+    int pid, waited, status;
+
+    sigaction(SIGUSR1, 0, &old_usr1);
+    sigaction(SIGUSR2, 0, &old_usr2);
+
+    // Register a caught handler for SIGUSR1.
+    action.sa_handler = fork_test_handler;
+    action.sa_mask = 0;
+    action.sa_flags = 0;
+    action.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGUSR1, &action, 0) < 0) {
+      printf("REG-28 FAIL: set SIGUSR1 handler\n");
+      exit(1);
+    }
+
+    // Set SIGUSR2 to SIG_IGN.
+    action.sa_handler = SIG_IGN;
+    action.sa_mask = 0;
+    action.sa_flags = 0;
+    action.sa_restorer = 0;
+
+    if (sigaction(SIGUSR2, &action, 0) < 0) {
+      printf("REG-28 FAIL: set SIGUSR2 ignore\n");
+      sigaction(SIGUSR1, &old_usr1, 0);
+      exit(1);
+    }
+
+    // Block SIGUSR2 to check whether exec preserves the mask.
+    set = (1U << SIGUSR2);
+
+    if (sigprocmask(SIG_BLOCK, &set, &oldset) < 0) {
+      printf("REG-28 FAIL: block SIGUSR2\n");
+      sigaction(SIGUSR1, &old_usr1, 0);
+      sigaction(SIGUSR2, &old_usr2, 0);
+      exit(1);
+    }
+
+    pid = fork();
+
+    if (pid < 0) {
+      printf("REG-28 FAIL: fork\n");
+      sigprocmask(SIG_SETMASK, &oldset, 0);
+      sigaction(SIGUSR1, &old_usr1, 0);
+      sigaction(SIGUSR2, &old_usr2, 0);
+      exit(1);
+    }
+
+    if (pid == 0) {
+      char *args[] = {"regtest", "exec-child", 0};
+
+      exec("/regtest", args);
+
+      // Reaching here means exec failed.
+      exit(1);
+    }
+
+    waited = wait(&status);
+
+    sigprocmask(SIG_SETMASK, &oldset, 0);
+    sigaction(SIGUSR1, &old_usr1, 0);
+    sigaction(SIGUSR2, &old_usr2, 0);
+
+    if (waited == pid && status == 0) {
+      printf(
+        "REG-28 PASS: Signal actions and mask handled correctly after exec\n");
+    } else {
+      printf("REG-28 FAIL: Signal state after exec is incorrect\n");
+      exit(1);
+    }
   }
 
   printf("===== TEST COMPLETED =====\n");
