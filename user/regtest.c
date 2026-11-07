@@ -102,24 +102,22 @@ void
 reg33_clobber_handler(int sig)
 {
   reg33_ran = 1;
-  asm volatile(
-    "li t0, 0xdead\n"
-    "li t1, 0xdead\n"
-    "li t2, 0xdead\n"
-    "li t3, 0xdead\n"
-    "li t4, 0xdead\n"
-    "li t5, 0xdead\n"
-    "li t6, 0xdead\n"
-    "li a1, 0xdead\n"
-    "li a2, 0xdead\n"
-    "li a3, 0xdead\n"
-    "li a4, 0xdead\n"
-    "li a5, 0xdead\n"
-    "li a6, 0xdead\n"
-    "li a7, 0xdead\n"
-    ::: "t0", "t1", "t2", "t3", "t4", "t5", "t6",
-        "a1", "a2", "a3", "a4", "a5", "a6", "a7"
-  );
+  asm volatile("li t0, 0xdead\n"
+               "li t1, 0xdead\n"
+               "li t2, 0xdead\n"
+               "li t3, 0xdead\n"
+               "li t4, 0xdead\n"
+               "li t5, 0xdead\n"
+               "li t6, 0xdead\n"
+               "li a1, 0xdead\n"
+               "li a2, 0xdead\n"
+               "li a3, 0xdead\n"
+               "li a4, 0xdead\n"
+               "li a5, 0xdead\n"
+               "li a6, 0xdead\n"
+               "li a7, 0xdead\n" ::
+                 : "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a1", "a2", "a3",
+                   "a4", "a5", "a6", "a7");
 }
 
 int
@@ -1115,16 +1113,14 @@ main(int argc, char *argv[])
     uint64 a0_val = 0;
     uint64 magic_a0 = 0x12345678ULL;
 
-    asm volatile(
-      "mv a0, %2\n"
-      "1:\n"
-      "lw t0, 0(%1)\n"
-      "beqz t0, 1b\n"
-      "sd a0, 0(%0)\n"
-      :
-      : "r"(&a0_val), "r"(&reg29_ran), "r"(magic_a0)
-      : "t0", "memory"
-    );
+    asm volatile("mv a0, %2\n"
+                 "1:\n"
+                 "lw t0, 0(%1)\n"
+                 "beqz t0, 1b\n"
+                 "sd a0, 0(%0)\n"
+                 :
+                 : "r"(&a0_val), "r"(&reg29_ran), "r"(magic_a0)
+                 : "t0", "memory");
 
     alarm(0);
     sigaction(SIGALRM, &oldact, 0);
@@ -1159,7 +1155,8 @@ main(int argc, char *argv[])
     sigaction(SIGUSR1, &oldact, 0);
 
     if (reg30_nested == 0 && reg30_count == 2) {
-      printf("REG-30 PASS: Recursive re-entry prevented, pending delivered after sigreturn (HD-08)\n");
+      printf(
+        "REG-30 PASS: Recursive re-entry prevented, pending delivered after sigreturn (HD-08)\n");
     } else {
       printf("REG-30 FAIL: count=%d, nested=%d\n", reg30_count, reg30_nested);
       exit(1);
@@ -1176,11 +1173,9 @@ main(int argc, char *argv[])
 
     if (pid == 0) {
       // Trong tiến trình con: Cố tình đặt sp không căn lề (sp = 1) rồi gọi sigreturn
-      asm volatile(
-        "li sp, 1\n"
-        "li a7, 24\n"     // 24 = SYS_sigreturn trong syscall.h
-        "ecall\n"
-      );
+      asm volatile("li sp, 1\n"
+                   "li a7, 24\n" // 24 = SYS_sigreturn trong syscall.h
+                   "ecall\n");
       // Nếu kernel không kill tiến trình con, tiến trình con thoát mã 0
       exit(0);
     }
@@ -1189,7 +1184,8 @@ main(int argc, char *argv[])
     int waited = wait(&status);
 
     if (waited == pid && status != 0) {
-      printf("REG-31 PASS: Bad stack frame killed process safely without panic (HD-09)\n");
+      printf(
+        "REG-31 PASS: Bad stack frame killed process safely without panic (HD-09)\n");
     } else {
       printf("REG-31 FAIL: child did not exit with error, status=%d\n", status);
       exit(1);
@@ -1214,7 +1210,9 @@ main(int argc, char *argv[])
     sigaction(SIGUSR1, &oldact, 0);
 
     if ((reg32_sp & 0xF) == 0) {
-      printf("REG-32 PASS: Stack pointer is 16-byte aligned (sp=0x%lx) (HD-10)\n", reg32_sp);
+      printf(
+        "REG-32 PASS: Stack pointer is 16-byte aligned (sp=0x%lx) (HD-10)\n",
+        reg32_sp);
     } else {
       printf("REG-32 FAIL: Stack pointer unaligned: 0x%lx\n", reg32_sp);
       exit(1);
@@ -1273,27 +1271,28 @@ main(int argc, char *argv[])
       "sd a7, 104(%0)\n"
       :
       : "r"(out_regs), "r"(&reg33_ran)
-      : "s1", "s2", "memory"
-    );
+      : "s1", "s2", "memory");
 
     alarm(0);
     sigaction(SIGALRM, &oldact, 0);
 
-    if (reg33_ran == 1 &&
-        out_regs[0] == 0x1000 && out_regs[1] == 0x1001 && out_regs[2] == 0x1002 &&
-        out_regs[3] == 0x1003 && out_regs[4] == 0x1004 && out_regs[5] == 0x1005 &&
-        out_regs[6] == 0x1006 && out_regs[7] == 0x2001 && out_regs[8] == 0x2002 &&
-        out_regs[9] == 0x2003 && out_regs[10] == 0x2004 && out_regs[11] == 0x2005 &&
+    if (reg33_ran == 1 && out_regs[0] == 0x1000 && out_regs[1] == 0x1001 &&
+        out_regs[2] == 0x1002 && out_regs[3] == 0x1003 &&
+        out_regs[4] == 0x1004 && out_regs[5] == 0x1005 &&
+        out_regs[6] == 0x1006 && out_regs[7] == 0x2001 &&
+        out_regs[8] == 0x2002 && out_regs[9] == 0x2003 &&
+        out_regs[10] == 0x2004 && out_regs[11] == 0x2005 &&
         out_regs[12] == 0x2006 && out_regs[13] == 0x2007) {
-      printf("REG-33 PASS: Caller-saved registers t0-t6, a1-a7 preserved across sigreturn (HD-03)\n");
+      printf(
+        "REG-33 PASS: Caller-saved registers t0-t6, a1-a7 preserved across sigreturn (HD-03)\n");
     } else {
       printf("REG-33 FAIL: Caller-saved registers corrupted!\n");
       printf("  t0-t6: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
-             out_regs[0], out_regs[1], out_regs[2], out_regs[3],
-             out_regs[4], out_regs[5], out_regs[6]);
+             out_regs[0], out_regs[1], out_regs[2], out_regs[3], out_regs[4],
+             out_regs[5], out_regs[6]);
       printf("  a1-a7: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
-             out_regs[7], out_regs[8], out_regs[9], out_regs[10],
-             out_regs[11], out_regs[12], out_regs[13]);
+             out_regs[7], out_regs[8], out_regs[9], out_regs[10], out_regs[11],
+             out_regs[12], out_regs[13]);
       exit(1);
     }
   }
