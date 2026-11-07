@@ -10,3 +10,6 @@ _*
 /user/usys.S
 .gdbinit
 TAGS
+docs/logs/
+docs/weekly/
+
