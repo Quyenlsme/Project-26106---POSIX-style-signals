@@ -27,21 +27,23 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ## 2. Ma trận Kiểm thử Chi tiết theo Module
 
-### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-11`)
+### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-13`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
-| **DL-01** | Gửi signal hợp lệ có handler | Đăng ký handler `SIGUSR1`, gọi `kill(pid, SIGUSR1)` | Handler thực thi thành công, tiến trình tiếp tục chạy | Chưa chạy |
-| **DL-02** | Signal bị blocked | Chặn `SIGUSR1`, gửi `SIGUSR1` | Handler chưa chạy; bit tồn tại trong `pending_signals` | Chưa chạy |
-| **DL-03** | Delivery sau khi unblock | Tiếp nối DL-02, gọi `sigprocmask(SIG_UNBLOCK)` | Handler kích hoạt ngay sau khi unblock | Chưa chạy |
-| **DL-04** | Gộp signal lặp lại | Chặn `SIGUSR1`, gửi 3 lần liên tiếp, mở chặn | Handler chỉ chạy đúng 1 lần duy nhất | Chưa chạy |
-| **DL-05** | Thứ tự ưu tiên tín hiệu | Gửi đồng thời `SIGUSR2` (12) và `SIGUSR1` (10) | `SIGUSR1` (số hiệu nhỏ hơn) được delivery trước | Chưa chạy |
-| **DL-06** | Gửi tới PID không tồn tại | Gọi `kill(9999, SIGUSR1)` | Syscall trả về `-1`, không ảnh hưởng kernel | Chưa chạy |
-| **DL-07** | Số hiệu signal không hợp lệ | Gọi `kill(pid, 0)` hoặc `kill(pid, 32)` | Syscall trả về `-1` | Chưa chạy |
-| **DL-08** | Hành vi mặc định `SIG_DFL` | Không đặt handler, gửi `SIGTERM` | Tiến trình kết thúc ngay lập tức với exit code -1 | Chưa chạy |
-| **DL-09** | Bỏ qua tín hiệu `SIG_IGN` | Đặt `SIG_IGN` cho `SIGUSR1`, gửi signal | Tín hiệu bị tiêu thụ, tiến trình không bị ngắt | Chưa chạy |
-| **DL-10** | Đánh thức tiến trình SLEEPING | Tiến trình con gọi `sleep()`, cha gửi signal | Con được đánh thức dậy để chạy handler | Chưa chạy |
-| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chưa chạy |
+| **DL-01** | Gửi signal hợp lệ có handler | Đăng ký handler `SIGUSR1`, gọi `kill(pid, SIGUSR1)` | Handler thực thi thành công, tiến trình tiếp tục chạy | PASS — `killtest` T10 |
+| **DL-02** | Signal bị blocked | Chặn `SIGUSR1`, gửi `SIGUSR1` | Handler chưa chạy; bit tồn tại trong `pending_signals` | PASS — `killtest` T7 |
+| **DL-03** | Delivery sau khi unblock | Tiếp nối DL-02, gọi `sigprocmask(SIG_UNBLOCK)` | Handler kích hoạt ngay sau khi unblock | PASS — `killtest` T7 |
+| **DL-04** | Gộp signal lặp lại | Chặn `SIGUSR1`, gửi 5 lần liên tiếp (từ chính mình và từ tiến trình khác), mở chặn | Handler chỉ chạy đúng 1 lần duy nhất | PASS — `killtest` T7 |
+| **DL-05** | Thứ tự ưu tiên tín hiệu | Chặn cả hai, gửi `SIGUSR2` (12) rồi `SIGUSR1` (10), mở chặn cùng lúc | `SIGUSR1` (số hiệu nhỏ hơn) được delivery trước | PASS — `killtest` T8 |
+| **DL-06** | Gửi tới PID không tồn tại | Gọi `kill(99999, SIGUSR1)`, `kill(0, …)`, `kill(-5, …)` | Syscall trả về `-1`, không ảnh hưởng kernel | PASS — `killtest` T2 |
+| **DL-07** | Số hiệu signal không hợp lệ | Gọi `kill(pid, 0)`, `kill(pid, -1)`, `kill(pid, 32)`, `kill(pid, 1000)` | Syscall trả về `-1` | PASS — `killtest` T1 |
+| **DL-08** | Hành vi mặc định `SIG_DFL` | Không đặt handler, gửi `SIGUSR1` / `SIGTERM` | Tiến trình kết thúc ngay lập tức với exit code -1 | PASS — `killtest` T5, T6 |
+| **DL-09** | Bỏ qua tín hiệu `SIG_IGN` | Đặt `SIG_IGN` cho `SIGUSR1`, gửi cho chính mình và gửi khi đang chờ `read()` | Tín hiệu bị tiêu thụ, tiến trình không bị ngắt, `read()` vẫn nhận dữ liệu | PASS — `killtest` T9 |
+| **DL-10** | Đánh thức tiến trình SLEEPING | Con chờ trên `read()` pipe, cha gửi `SIGKILL` / `SIGTERM` / `SIGUSR1` (có handler); lặp 500 vòng gửi đúng lúc con vừa vào `read()` | Con được đánh thức; `SIG_DFL` → thoát `-1`; có handler → `read()` trả `-1`, handler chạy, con chạy tiếp; 0 lần mất wakeup | PASS — `killtest` T4, T6, T10 |
+| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chưa chạy — Kiên khảo sát Ctrl-C tuần 3, hiện thực tuần 4 |
+| **DL-12** | Signal bị chặn không ngắt syscall | Chặn `SIGUSR2`, tiến trình đang chờ `read()`, gửi `SIGUSR2` rồi ghi dữ liệu vào pipe | `read()` không bị ngắt, vẫn nhận đúng dữ liệu | PASS — `killtest` T12 |
+| **DL-13** | Stress gửi signal đồng thời đa CPU | `CPUS=4`: 4 tiến trình × 200 `kill()` đồng thời vào 1 nạn nhân đang chặn; 4 tiến trình cùng `SIGKILL` 4 nạn nhân | Không mất bit pending (mỗi loại chạy handler đúng 1 lần), không panic / deadlock | PASS — `killtest` T11 |
 
 ---
 

@@ -101,7 +101,8 @@ consoleread(int user_dst, uint64 dst, int n)
         release(&cons.lock);
         return -1;
       }
-      sleep_prepare(&cons.r);
+      if (sleep_prepare_intr(&cons.r))
+        continue;
       release(&cons.lock);
       sleep();
       acquire(&cons.lock);

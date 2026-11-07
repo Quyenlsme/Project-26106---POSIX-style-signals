@@ -79,6 +79,7 @@ kkill(pid, sig):
            b. Nếu là tín hiệu khác:
               - Gọi sig_send(p, sig):
                   + Bật bit: p->pending_signals |= (1U << sig);
+                  + Xóa p->chan = 0 (tránh wakeup() cũ trên kênh chờ đánh thức nhầm sau này).
                   + Nếu p->state == SLEEPING: chuyển p->state = RUNNABLE (đánh thức tiến trình).
               - Nhả p->lock và trả về 0.
        - Nhả p->lock nếu PID không khớp.
@@ -124,7 +125,9 @@ sig_deliver():
        - Đọc cấu hình: act = p->sig_actions[i];
        
        - Trường hợp 1: act.sa_handler == SIG_IGN (Bỏ qua)
-             Không làm gì, kết thúc để tiếp tục luồng user.
+             Bỏ signal này và QUAY LẠI bước 1 để xét signal pending kế tiếp
+             (sig_deliver là một vòng lặp — tránh để signal sẵn sàng khác bị
+             kẹt tới lần trở về user sau).
              (Lưu ý: SIGKILL không bao giờ rơi vào đây do không thể bị set SIG_IGN).
 
        - Trường hợp 2: act.sa_handler == SIG_DFL (Hành vi mặc định)
@@ -147,7 +150,106 @@ Thao tác xóa bit `p->pending_signals &= ~(1U << i)` diễn ra dưới `p->lock
 
 ---
 
-## 5. Tương tác với Phím Ctrl+C từ Bàn phím Console
+## 5. Ngắt System Call đang chờ: `sig_interrupted()`
+
+### 5.1. Vấn đề
+Bản gốc xv6 chỉ kiểm tra `p->killed` trong các vòng chờ (`while (...) { if (killed(p)) return -1; sleep(...); }`). `sig_send()` có đánh thức tiến trình (`SLEEPING → RUNNABLE`), nhưng vì `killed == 0` với các signal thường, tiến trình **ngủ lại ngay**: `SIGTERM`, `SIGUSR1`… không bao giờ được giao cho tiến trình đang chờ `read()` / `wait()` / `pause()`. Chỉ `SIGKILL` ngắt được.
+
+### 5.2. Giải pháp
+Hàm mới trong `kernel/proc.c` (khai báo ở `kernel/defs.h`):
+
+```c
+int sig_interrupted(struct proc *p);
+// = 1 nếu p->killed, HOẶC có signal pending, KHÔNG bị chặn, và handler != SIG_IGN
+```
+
+Thay `killed()` bằng `sig_interrupted()` tại **5 điểm chờ**:
+
+| Điểm chờ | File | Khóa đang giữ khi gọi |
+|---|---|---|
+| `consoleread` | `kernel/console.c` | `cons.lock` |
+| `piperead` | `kernel/pipe.c` | `pi->lock` |
+| `pipewrite` | `kernel/pipe.c` | `pi->lock` |
+| `kwait` | `kernel/proc.c` | `wait_lock` |
+| `sys_pause` | `kernel/sysproc.c` | `tickslock` |
+
+`killed()` trong `kernel/trap.c` **giữ nguyên**: ở đó nó dùng để kết thúc tiến trình bị `SIGKILL`.
+
+### 5.3. Hành vi
+1. Syscall đang chờ nhả khóa và trả `-1` (tương đương `EINTR` của POSIX).
+2. Trên đường về user, `prepare_return()` → `sig_deliver()` giao signal:
+   * `SIG_DFL` → `kexit(-1)`.
+   * Handler → chạy handler, sau `sigreturn()` chương trình tiếp tục với giá trị trả về `-1` của syscall.
+3. Signal **đang bị chặn** hoặc **bị `SIG_IGN`** không làm `sig_interrupted()` trả 1 ⇒ syscall tiếp tục chờ bình thường (DL-09, DL-12).
+
+### 5.4. Race "lost wakeup" với `sleep_prepare()` / `sleep()` (Tuần 3)
+
+Bản xv6 này không dùng `sleep(chan, lk)` cổ điển mà tách làm hai bước:
+
+```c
+sleep_prepare(chan);   // dưới p->lock: p->chan = chan
+release(cond_lock);    // nhả khóa điều kiện (pi->lock, cons.lock, ...)
+sleep();               // dưới p->lock: chỉ ngủ nếu p->chan != 0
+```
+
+`wakeup(chan)` báo "đã có sự kiện" bằng cách **xóa `p->chan = 0`**; nhờ vậy `sleep()` biết để không ngủ nữa. Vòng chờ có signal trông như sau:
+
+```c
+while (chưa có dữ liệu) {
+  if (sig_interrupted(p)) { release(lk); return -1; }  // (1) kiểm tra signal
+  sleep_prepare(chan);                                  // (2) đặt p->chan
+  release(lk);
+  sleep();                                              // (3) ngủ nếu p->chan != 0
+  acquire(lk);
+}
+```
+
+Có **hai khe** mà signal đến sẽ bị mất (tiến trình ngủ dù signal đang chờ):
+
+| Signal đến lúc | Vấn đề | Cách sửa | Ai sửa |
+|---|---|---|---|
+| Giữa (2) và (3) | Tiến trình đang `RUNNING` nên `sig_send()` không đổi state; `p->chan` vẫn ≠ 0 ⇒ (3) ngủ luôn | `sig_send()` và nhánh `SIGKILL` của `kkill()` xóa **`p->chan = 0`** giống `wakeup()` ⇒ (3) không ngủ, vòng lặp quay lại (1) | Commit `7d73a0a` |
+| Giữa (1) và (2) | `sig_send()` xóa `p->chan` nhưng ngay sau đó (2) **gán lại** `p->chan` ≠ 0 ⇒ (3) ngủ luôn | Gộp (1) và (2) làm **một bước nguyên tử** dưới cùng một lần giữ `p->lock`: hàm mới `sleep_prepare_intr(chan)` — nếu đã có signal cần giao thì **không** đặt `p->chan` và trả 1 | Tuần 3 — Quyền |
+
+```c
+// kernel/proc.c
+int sleep_prepare_intr(void *chan)
+{
+  acquire(&p->lock);
+  r = sig_deliverable_locked(p);   // cùng điều kiện với sig_interrupted()
+  if (!r) p->chan = chan;
+  release(&p->lock);
+  return r;                        // 1 => có signal, không ngủ
+}
+```
+
+Tại 5 điểm chờ, `sleep_prepare(chan)` được thay bằng:
+
+```c
+if (sleep_prepare_intr(chan))
+  continue;            // quay lại đầu vòng: (1) thấy signal -> return -1
+```
+
+Vì `sig_send()` cũng chạy dưới `p->lock`, mọi signal hoặc đến **trước** bước nguyên tử (bị phát hiện, không ngủ) hoặc **sau** (xóa `p->chan`, `sleep()` không ngủ) ⇒ không còn khe nào.
+
+**Kiểm chứng (fault injection):** chèn tạm vòng trễ giữa (1) và (2) trong `piperead` để mở rộng khe, chạy 300 vòng "con vừa vào `read()` thì cha gửi `SIGUSR1`" trên `CPUS=4`:
+
+| Phiên bản kernel (có chèn trễ) | Số lần mất wakeup / 300 |
+|---|---|
+| `main@9880d92` (đã có `p->chan = 0`) | **7** |
+| + `sleep_prepare_intr()` | **0** |
+
+Bản chính thức (không chèn trễ) được kiểm tra bằng `killtest` Test 10: 500 vòng, 0 lần mất wakeup.
+
+### 5.5. Thứ tự khóa
+Mọi điểm gọi đều theo chiều **khóa điều kiện → `p->lock`**, cùng chiều với `sleep_prepare()`/`wakeup()` gốc ⇒ không phát sinh deadlock. Phân tích đầy đủ: [`signal-core-locking.md`](signal-core-locking.md).
+
+---
+
+## 6. Tương tác với Phím Ctrl+C từ Bàn phím Console
+
+> Phần hiện thực luồng `Ctrl-C → SIGINT` và quản lý `fgpid` do Nguyễn Trung Kiên phụ trách từ tuần 3. Module Delivery chỉ cung cấp `kkill(pid, SIGINT)` và cơ chế ngắt `consoleread` qua `sig_interrupted()`.
+
 
 Nhằm hiện thực hóa kịch bản người dùng nhấn `Ctrl+C` để ngắt chương trình đang chạy trong console:
 1. Khi bàn phím gửi ký tự `0x03` (`ETX` - End of Text), hàm `consoleintr()` trong `kernel/console.c` nhận diện được sự kiện này.
@@ -157,7 +259,7 @@ Nhằm hiện thực hóa kịch bản người dùng nhấn `Ctrl+C` để ng�
 
 ---
 
-## 6. Sơ đồ Luồng Thực thi (Execution Flow)
+## 7. Sơ đồ Luồng Thực thi (Execution Flow)
 
 ```mermaid
 sequenceDiagram
@@ -195,18 +297,33 @@ sequenceDiagram
 
 ---
 
-## 7. Ma trận Kiểm thử Module Delivery (DL-01 đến DL-11)
+## 8. Ma trận Kiểm thử Module Delivery (DL-01 đến DL-13)
 
-| Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi |
-|---|---|---|---|
-| **DL-01** | Gửi tín hiệu thông thường | Gửi `SIGUSR1` tới tiến trình có handler | Handler chạy thành công, không làm crash tiến trình |
-| **DL-02** | Tín hiệu bị chặn (Masked) | Chặn `SIGUSR1`, sau đó gửi `SIGUSR1` | Handler chưa chạy; bit tồn tại trong `pending_signals` |
-| **DL-03** | Delivery sau khi Unmask | Tiếp tục từ DL-02, mở chặn `SIGUSR1` | Handler được gọi thực thi ngay sau khi unmask |
-| **DL-04** | Gộp tín hiệu lặp lại | Chặn `SIGUSR1`, gửi 3 lần liên tiếp, mở chặn | Handler chỉ chạy đúng 1 lần duy nhất |
-| **DL-05** | Thứ tự ưu tiên tín hiệu | Gửi cùng lúc `SIGUSR2` (12) và `SIGUSR1` (10) | `SIGUSR1` có số hiệu nhỏ hơn được delivery trước |
-| **DL-06** | Gửi tới PID không tồn tại | Gọi `kill(9999, SIGUSR1)` | Syscall trả về `-1`, kernel hoạt động ổn định |
-| **DL-07** | Số hiệu tín hiệu sai | Gọi `kill(pid, 0)` hoặc `kill(pid, 32)` | Syscall trả về `-1` |
-| **DL-08** | Hành vi mặc định `SIG_DFL` | Không đặt handler, gửi `SIGTERM` | Tiến trình kết thúc ngay lập tức với exit code -1 |
-| **DL-09** | Hành vi bỏ qua `SIG_IGN` | Đặt `SIG_IGN` cho `SIGUSR1`, gửi signal | Tín hiệu bị tiêu thụ, tiến trình chạy tiếp bình thường |
-| **DL-10** | Đánh thức tiến trình SLEEPING | Tiến trình con gọi `sleep()`, cha gửi signal | Tiến trình con được đánh thức dậy để chạy handler |
-| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công |
+Toàn bộ ca kiểm thử nằm trong `user/killtest.c` (chạy: `$ killtest` trong shell xv6).
+
+| Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi | Test trong `killtest` |
+|---|---|---|---|---|
+| **DL-01** | Gửi tín hiệu thông thường | Gửi `SIGUSR1` tới tiến trình có handler | Handler chạy thành công, không làm crash tiến trình | T10 |
+| **DL-02** | Tín hiệu bị chặn (Masked) | Chặn `SIGUSR1`, sau đó gửi `SIGUSR1` | Handler chưa chạy; bit tồn tại trong `pending_signals` | T7 |
+| **DL-03** | Delivery sau khi Unmask | Tiếp tục từ DL-02, mở chặn `SIGUSR1` | Handler được gọi thực thi ngay sau khi unmask | T7 |
+| **DL-04** | Gộp tín hiệu lặp lại | Chặn `SIGUSR1`, gửi 5 lần (từ chính mình và từ tiến trình khác), mở chặn | Handler chỉ chạy đúng 1 lần duy nhất | T7 |
+| **DL-05** | Thứ tự ưu tiên tín hiệu | Chặn cả hai, gửi `SIGUSR2` (12) rồi `SIGUSR1` (10), mở chặn cùng lúc | `SIGUSR1` có số hiệu nhỏ hơn được delivery trước | T8 |
+| **DL-06** | Gửi tới PID không tồn tại | Gọi `kill(99999, SIGUSR1)`, `kill(0, …)`, `kill(-5, …)` | Syscall trả về `-1`, kernel hoạt động ổn định | T2 |
+| **DL-07** | Số hiệu tín hiệu sai | Gọi `kill(pid, 0)`, `-1`, `32`, `1000` | Syscall trả về `-1` | T1 |
+| **DL-08** | Hành vi mặc định `SIG_DFL` | Không đặt handler, gửi `SIGUSR1` / `SIGTERM` | Tiến trình kết thúc ngay lập tức với exit code -1 | T5, T6 |
+| **DL-09** | Hành vi bỏ qua `SIG_IGN` | Đặt `SIG_IGN` cho `SIGUSR1`, gửi khi đang chờ `read()` | Tín hiệu bị tiêu thụ, `read()` không bị ngắt, tiến trình chạy tiếp | T9 |
+| **DL-10** | Đánh thức tiến trình SLEEPING | Con chờ trên `read()` pipe; cha gửi `SIGKILL` / `SIGTERM` / `SIGUSR1` có handler; lặp 500 vòng gửi đúng lúc con vừa vào `read()` | Con được đánh thức; `SIG_DFL` → thoát `-1`; có handler → `read()` trả `-1`, handler chạy, con chạy tiếp; **0 lần mất wakeup** | T4, T6, T10 |
+| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chờ luồng Ctrl-C (Kiên) |
+| **DL-12** | Signal bị chặn không ngắt syscall | Chặn `SIGUSR2`, đang chờ `read()`, gửi `SIGUSR2` rồi ghi dữ liệu | `read()` vẫn chờ và nhận đúng dữ liệu | T12 |
+| **DL-13** | Stress đa CPU | `CPUS=4`: 4 tiến trình × 200 `kill()` đồng thời; 4 tiến trình cùng `SIGKILL` 4 nạn nhân | Không mất bit pending, không panic / deadlock | T11 |
+
+### 8.1. Kết quả chạy thực tế
+
+Chạy trên `main@9880d92` + thay đổi Tuần 3 của module Delivery (`sleep_prepare_intr`, `killtest` 38 checks):
+
+| Cấu hình | `killtest` | `sigtest` | `pausetest` | `alarm_demo` / `mask_demo` | `forktest` | `usertests -q` |
+|---|---|---|---|---|---|---|
+| `make qemu CPUS=1` | 38/38 PASS (chạy lặp 3 lần) | ALL PASSED | 12/12 PASS | chạy đúng | OK | ALL TESTS PASSED |
+| `make qemu CPUS=4` | 38/38 PASS (chạy lặp 3 lần) | ALL PASSED | 12/12 PASS | chạy đúng | OK | ALL TESTS PASSED |
+
+Không xuất hiện kernel panic hay treo ở cả hai cấu hình.

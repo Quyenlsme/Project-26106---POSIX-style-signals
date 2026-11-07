@@ -90,6 +90,7 @@ void            proc_freepagetable(pagetable_t, uint64);
 int             kkill(int, int);
 int             sig_send(struct proc*, int);
 int             sig_interrupted(struct proc*);
+int             sleep_prepare_intr(void*);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
 struct cpu*     mycpu(void);
