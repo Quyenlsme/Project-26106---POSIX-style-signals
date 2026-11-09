@@ -533,6 +533,21 @@ test_multicpu_stress(void)
         "SIGKILL dong thoi: 4 nan nhan chet (-1), sender thoat binh thuong");
 }
 
+// Test 13 (DL-14): gửi signal tới tiến trình ZOMBIE (đã exit, cha chưa wait)
+static void
+test_zombie(void)
+{
+  printf("Test 13 (DL-14): gui signal toi tien trinh ZOMBIE\n");
+  int pid = fork();
+  if (pid == 0)
+    exit(7); // con thoát ngay -> thành ZOMBIE
+  pause(5);  // cha ngủ 5 tick, CHƯA wait, để con kịp exit
+  check(kill(pid, SIGUSR1) == -1, "kill(zombie, SIGUSR1) == -1");
+  int status = 0;
+  int w = wait(&status);
+  check(w == pid && status == 7, "wait() van nhan dung exit status 7");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -557,6 +572,7 @@ main(int argc, char *argv[])
   test_multicpu_stress();
   printf("Test 12 (DL-12): signal bi chan khong ngat read() dang cho\n");
   test_no_interrupt(SIGUSR2, 1, 4, "bi chan: read() van cho va nhan du lieu");
+  test_zombie();
 
   printf("=== Ket qua: %d PASS, %d FAIL ===\n", passed, failed);
   if (failed == 0)
