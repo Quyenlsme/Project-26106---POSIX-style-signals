@@ -548,6 +548,42 @@ test_zombie(void)
   check(w == pid && status == 7, "wait() van nhan dung exit status 7");
 }
 
+// Test 14 (DL-15): SIGKILL vẫn kết thúc tiến trình đã chặn hết signal và đang
+// ngủ trong pause()
+static void
+test_sigkill_blocked_all(void)
+{
+  printf("Test 14 (DL-15): SIGKILL khi da chan het signal va dang pause\n");
+  int ready[2];
+  if (pipe(ready) < 0) {
+    check(0, "pipe");
+    return;
+  }
+  int pid = fork();
+  if (pid == 0) {
+    close(ready[0]);
+    unsigned int all = 0xFFFFFFFF;
+    sigprocmask(SIG_SETMASK, &all, 0); // xin chặn TẤT CẢ signal
+    unsigned int cur = 0;
+    sigprocmask(SIG_BLOCK, 0, &cur);    // đọc lại mask thực tế
+    write(ready[1], &cur, sizeof(cur)); // báo mask cho cha
+    pause(0x7fffffff);                  // ngủ "vô hạn"
+    exit(0);                            // không bao giờ tới đây
+  }
+  close(ready[1]);
+  unsigned int cur = 0;
+  read(ready[0], &cur, sizeof(cur));
+  check((cur & (1U << SIGKILL)) == 0,
+        "SIGKILL khong nam trong mask (kernel khong cho chan)");
+  check((cur & (1U << SIGUSR1)) != 0, "cac signal khac da bi chan");
+  pause(2); // cho con kịp vào pause()
+  check(kill(pid, SIGKILL) == 0, "kill(child, SIGKILL) == 0");
+  int status = 0;
+  int w = wait(&status);
+  check(w == pid && status == -1, "con ket thuc voi status -1, khong treo");
+  close(ready[0]);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -573,6 +609,7 @@ main(int argc, char *argv[])
   printf("Test 12 (DL-12): signal bi chan khong ngat read() dang cho\n");
   test_no_interrupt(SIGUSR2, 1, 4, "bi chan: read() van cho va nhan du lieu");
   test_zombie();
+  test_sigkill_blocked_all();
 
   printf("=== Ket qua: %d PASS, %d FAIL ===\n", passed, failed);
   if (failed == 0)
