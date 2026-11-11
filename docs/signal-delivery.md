@@ -297,7 +297,7 @@ sequenceDiagram
 
 ---
 
-## 8. Ma trận Kiểm thử Module Delivery (DL-01 đến DL-13)
+## 8. Ma trận Kiểm thử Module Delivery (DL-01 đến DL-16)
 
 Toàn bộ ca kiểm thử nằm trong `user/killtest.c` (chạy: `$ killtest` trong shell xv6).
 
@@ -316,6 +316,9 @@ Toàn bộ ca kiểm thử nằm trong `user/killtest.c` (chạy: `$ killtest` t
 | **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chờ luồng Ctrl-C (Kiên) |
 | **DL-12** | Signal bị chặn không ngắt syscall | Chặn `SIGUSR2`, đang chờ `read()`, gửi `SIGUSR2` rồi ghi dữ liệu | `read()` vẫn chờ và nhận đúng dữ liệu | T12 |
 | **DL-13** | Stress đa CPU | `CPUS=4`: 4 tiến trình × 200 `kill()` đồng thời; 4 tiến trình cùng `SIGKILL` 4 nạn nhân | Không mất bit pending, không panic / deadlock | T11 |
+| **DL-14** | Gửi tới tiến trình ZOMBIE | Con `exit(7)` ngay, cha chưa `wait`, gửi `SIGUSR1` | `kill()` trả `-1`; `wait()` vẫn nhận status `7` | T13 |
+| **DL-15** | SIGKILL không chặn được khi đang ngủ | Con chặn tất cả signal rồi `pause(0x7fffffff)`; cha gửi `SIGKILL` | `SIGKILL` không nằm trong mask; con chết với status `-1` | T14 |
+| **DL-16** | Tự gửi signal có handler | `kill(getpid(), SIGUSR1)` khi có handler | Handler chạy xong trước khi `kill()` trả về | T15 |
 
 ### 8.1. Kết quả chạy thực tế
 
@@ -323,7 +326,7 @@ Chạy trên `main@9880d92` + thay đổi Tuần 3 của module Delivery (`sleep
 
 | Cấu hình | `killtest` | `sigtest` | `pausetest` | `alarm_demo` / `mask_demo` | `forktest` | `usertests -q` |
 |---|---|---|---|---|---|---|
-| `make qemu CPUS=1` | 38/38 PASS (chạy lặp 3 lần) | ALL PASSED | 12/12 PASS | chạy đúng | OK | ALL TESTS PASSED |
-| `make qemu CPUS=4` | 38/38 PASS (chạy lặp 3 lần) | ALL PASSED | 12/12 PASS | chạy đúng | OK | ALL TESTS PASSED |
+| `make qemu CPUS=1` | 47/47 PASS (chạy lặp 3 lần) | ALL PASSED | 12/12 PASS | chạy đúng | OK | ALL TESTS PASSED |
+| `make qemu CPUS=4` | 47/47 PASS (chạy lặp 3 lần) | ALL PASSED | 12/12 PASS | chạy đúng | OK | ALL TESTS PASSED |
 
 Không xuất hiện kernel panic hay treo ở cả hai cấu hình.

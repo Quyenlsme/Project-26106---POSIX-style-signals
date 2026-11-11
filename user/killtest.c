@@ -533,6 +533,72 @@ test_multicpu_stress(void)
         "SIGKILL dong thoi: 4 nan nhan chet (-1), sender thoat binh thuong");
 }
 
+// Test 13 (DL-14): gửi signal tới tiến trình ZOMBIE (đã exit, cha chưa wait)
+static void
+test_zombie(void)
+{
+  printf("Test 13 (DL-14): gui signal toi tien trinh ZOMBIE\n");
+  int pid = fork();
+  if (pid == 0)
+    exit(7); // con thoát ngay -> thành ZOMBIE
+  pause(5);  // cha ngủ 5 tick, CHƯA wait, để con kịp exit
+  check(kill(pid, SIGUSR1) == -1, "kill(zombie, SIGUSR1) == -1");
+  int status = 0;
+  int w = wait(&status);
+  check(w == pid && status == 7, "wait() van nhan dung exit status 7");
+}
+
+// Test 14 (DL-15): SIGKILL vẫn kết thúc tiến trình đã chặn hết signal và đang
+// ngủ trong pause()
+static void
+test_sigkill_blocked_all(void)
+{
+  printf("Test 14 (DL-15): SIGKILL khi da chan het signal va dang pause\n");
+  int ready[2];
+  if (pipe(ready) < 0) {
+    check(0, "pipe");
+    return;
+  }
+  int pid = fork();
+  if (pid == 0) {
+    close(ready[0]);
+    unsigned int all = 0xFFFFFFFF;
+    sigprocmask(SIG_SETMASK, &all, 0); // xin chặn TẤT CẢ signal
+    unsigned int cur = 0;
+    sigprocmask(SIG_BLOCK, 0, &cur);    // đọc lại mask thực tế
+    write(ready[1], &cur, sizeof(cur)); // báo mask cho cha
+    pause(0x7fffffff);                  // ngủ "vô hạn"
+    exit(0);                            // không bao giờ tới đây
+  }
+  close(ready[1]);
+  unsigned int cur = 0;
+  read(ready[0], &cur, sizeof(cur));
+  check((cur & (1U << SIGKILL)) == 0,
+        "SIGKILL khong nam trong mask (kernel khong cho chan)");
+  check((cur & (1U << SIGUSR1)) != 0, "cac signal khac da bi chan");
+  pause(2); // cho con kịp vào pause()
+  check(kill(pid, SIGKILL) == 0, "kill(child, SIGKILL) == 0");
+  int status = 0;
+  int w = wait(&status);
+  check(w == pid && status == -1, "con ket thuc voi status -1, khong treo");
+  close(ready[0]);
+}
+
+// Test 15 (DL-16): tự gửi signal có handler -> handler đã chạy xong ngay khi
+// kill() trả về (signal được giao ở lần trở về user mode của chính syscall đó)
+static void
+test_self_send_handler(void)
+{
+  printf("Test 15 (DL-16): tu gui signal co handler\n");
+  usr1_count = 0;
+  check(set_handler(SIGUSR1, on_usr1) == 0, "sigaction(SIGUSR1, handler) == 0");
+  int r = kill(getpid(), SIGUSR1);
+  int seen = usr1_count; // đọc NGAY sau khi kill() trả về
+  check(r == 0, "kill(self, SIGUSR1) == 0");
+  check(seen == 1, "handler da chay xong ngay khi kill() tra ve");
+  set_handler(SIGUSR1, SIG_DFL);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -557,6 +623,9 @@ main(int argc, char *argv[])
   test_multicpu_stress();
   printf("Test 12 (DL-12): signal bi chan khong ngat read() dang cho\n");
   test_no_interrupt(SIGUSR2, 1, 4, "bi chan: read() van cho va nhan du lieu");
+  test_zombie();
+  test_sigkill_blocked_all();
+  test_self_send_handler();
 
   printf("=== Ket qua: %d PASS, %d FAIL ===\n", passed, failed);
   if (failed == 0)
