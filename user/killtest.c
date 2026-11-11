@@ -584,6 +584,21 @@ test_sigkill_blocked_all(void)
   close(ready[0]);
 }
 
+// Test 15 (DL-16): tự gửi signal có handler -> handler đã chạy xong ngay khi
+// kill() trả về (signal được giao ở lần trở về user mode của chính syscall đó)
+static void
+test_self_send_handler(void)
+{
+  printf("Test 15 (DL-16): tu gui signal co handler\n");
+  usr1_count = 0;
+  check(set_handler(SIGUSR1, on_usr1) == 0, "sigaction(SIGUSR1, handler) == 0");
+  int r = kill(getpid(), SIGUSR1);
+  int seen = usr1_count; // đọc NGAY sau khi kill() trả về
+  check(r == 0, "kill(self, SIGUSR1) == 0");
+  check(seen == 1, "handler da chay xong ngay khi kill() tra ve");
+  set_handler(SIGUSR1, SIG_DFL);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -610,6 +625,7 @@ main(int argc, char *argv[])
   test_no_interrupt(SIGUSR2, 1, 4, "bi chan: read() van cho va nhan du lieu");
   test_zombie();
   test_sigkill_blocked_all();
+  test_self_send_handler();
 
   printf("=== Ket qua: %d PASS, %d FAIL ===\n", passed, failed);
   if (failed == 0)
