@@ -27,7 +27,7 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ## 2. Ma trận Kiểm thử Chi tiết theo Module
 
-### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-13`)
+### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-16`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
@@ -44,6 +44,9 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chưa chạy — Kiên khảo sát Ctrl-C tuần 3, hiện thực tuần 4 |
 | **DL-12** | Signal bị chặn không ngắt syscall | Chặn `SIGUSR2`, tiến trình đang chờ `read()`, gửi `SIGUSR2` rồi ghi dữ liệu vào pipe | `read()` không bị ngắt, vẫn nhận đúng dữ liệu | PASS — `killtest` T12 |
 | **DL-13** | Stress gửi signal đồng thời đa CPU | `CPUS=4`: 4 tiến trình × 200 `kill()` đồng thời vào 1 nạn nhân đang chặn; 4 tiến trình cùng `SIGKILL` 4 nạn nhân | Không mất bit pending (mỗi loại chạy handler đúng 1 lần), không panic / deadlock | PASS — `killtest` T11 |
+| **DL-14** | Gửi signal tới tiến trình ZOMBIE | Con `exit(7)` ngay, cha chưa `wait`, gửi `kill(pid, SIGUSR1)` | `kill()` trả `-1`; `wait()` vẫn nhận đúng status `7` | PASS — `killtest` T13 |
+| **DL-15** | SIGKILL khi đã chặn hết và đang `pause` | Con `sigprocmask(SIG_SETMASK, 0xFFFFFFFF)` rồi `pause(0x7fffffff)`; cha gửi `SIGKILL` | Mask thực tế không chứa `SIGKILL`; con kết thúc với status `-1`, không treo | PASS — `killtest` T14 |
+| **DL-16** | Tự gửi signal có handler | Đăng ký handler `SIGUSR1`, gọi `kill(getpid(), SIGUSR1)` | Handler đã chạy xong ngay khi `kill()` trả về | PASS — `killtest` T15 |
 
 ---
 
