@@ -7,6 +7,7 @@
 //   control-u -- kill line
 //   control-d -- end of file
 //   control-p -- print process list
+//   control-c -- send SIGINT to foreground process
 //
 
 #include <stdarg.h>
@@ -54,6 +55,17 @@ struct {
   uint w; // Write index
   uint e; // Edit index
 } cons;
+
+// Foreground process PID receiving Ctrl+C; protected by cons.lock (0 = none).
+static int fg_pid = 0;
+
+void
+console_setfg(int pid)
+{
+  acquire(&cons.lock);
+  fg_pid = pid;
+  release(&cons.lock);
+}
 
 //
 // user write() system calls to the console go here.
@@ -150,6 +162,14 @@ consoleintr(int c)
   acquire(&cons.lock);
 
   switch (c) {
+  case C('C'): // Interrupt foreground process with SIGINT.
+    consputc('^');
+    consputc('C');
+    consputc('\n');
+    cons.e = cons.w; // Discard uncommitted line input
+    if (fg_pid > 0)
+      kkill(fg_pid, SIGINT);
+    break;
   case C('P'): // Print process list.
     procdump();
     break;

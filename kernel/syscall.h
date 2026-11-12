@@ -25,3 +25,4 @@
 #define SYS_sigreturn   24
 #define SYS_sigprocmask 25
 #define SYS_alarm       26
+#define SYS_setfg       27

@@ -107,6 +107,7 @@ extern uint64 sys_sigaction(void);
 extern uint64 sys_sigreturn(void);
 extern uint64 sys_sigprocmask(void);
 extern uint64 sys_alarm(void);
+extern uint64 sys_setfg(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -138,6 +139,7 @@ static uint64 (*syscalls[])(void) = {
   [SYS_sigreturn]   = sys_sigreturn,
   [SYS_sigprocmask] = sys_sigprocmask,
   [SYS_alarm]       = sys_alarm,
+  [SYS_setfg]       = sys_setfg,
   // clang-format on
 };
 

@@ -22,8 +22,9 @@ Dự án được phân rã thành 3 module kỹ thuật độc lập tương �
 │ • p->pending_signals│ • struct sigaction        │ • p->blocked_signals │
 │ • sig_send()        │ • struct sigframe         │ • kalarm()           │
 │ • sig_deliver()     │ • sig_setup_frame()       │ • p->alarm_deadline  │
-│ • Bắt phím Ctrl+C   │ • ksigreturn()            │ • sig_alarm_check()  │
+│                     │ • ksigreturn()            │ • sig_alarm_check()  │
 │                     │ • Bảo toàn trapframe & a0 │ • sig_sanitize()     │
+│                     │                           │ • Bắt phím Ctrl+C    │
 └─────────────────────┴───────────────────────────┴──────────────────────┘
 ```
 
@@ -145,7 +146,8 @@ Tuyệt đối không lồng hai khóa này vào nhau để triệt tiêu hoàn 
 |---|---|---|---|
 | `sigaction` | `23` | `int sigaction(int, const struct sigaction *, struct sigaction *);` | `int ksigaction(int, uint64, uint64);` |
 | `sigreturn` | `24` | `int sigreturn(void);` | `uint64 ksigreturn(void);` |
-| `sigprocmask` | `25` | `int sigprocmask(int, const uint *, uint *);` | `int ksigprocmask(int, uint64, uint64);` |
+| `sigprocmask` | `25` | `int sigprocmask(int, const unsigned int *, unsigned int *);` | `int ksigprocmask(int, uint64, uint64);` |
 | `alarm` | `26` | `int alarm(int);` | `int kalarm(int);` |
+| `setfg` | `27` | `int setfg(int);` | `void console_setfg(int);` |
 | `kill` | `6` (sửa đổi) | `int kill(int, int);` | `int kkill(int, int);` |
 

@@ -41,7 +41,7 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **DL-08** | Hành vi mặc định `SIG_DFL` | Không đặt handler, gửi `SIGUSR1` / `SIGTERM` | Tiến trình kết thúc ngay lập tức với exit code -1 | PASS — `killtest` T5, T6 |
 | **DL-09** | Bỏ qua tín hiệu `SIG_IGN` | Đặt `SIG_IGN` cho `SIGUSR1`, gửi cho chính mình và gửi khi đang chờ `read()` | Tín hiệu bị tiêu thụ, tiến trình không bị ngắt, `read()` vẫn nhận dữ liệu | PASS — `killtest` T9 |
 | **DL-10** | Đánh thức tiến trình SLEEPING | Con chờ trên `read()` pipe, cha gửi `SIGKILL` / `SIGTERM` / `SIGUSR1` (có handler); lặp 500 vòng gửi đúng lúc con vừa vào `read()` | Con được đánh thức; `SIG_DFL` → thoát `-1`; có handler → `read()` trả `-1`, handler chạy, con chạy tiếp; 0 lần mất wakeup | PASS — `killtest` T4, T6, T10 |
-| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chưa chạy — Kiên khảo sát Ctrl-C tuần 3, hiện thực tuần 4 |
+| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chưa chạy — đã hoàn tất code trên nhánh `feature/ctrlc-sigint`, chờ kiểm thử QEMU |
 | **DL-12** | Signal bị chặn không ngắt syscall | Chặn `SIGUSR2`, tiến trình đang chờ `read()`, gửi `SIGUSR2` rồi ghi dữ liệu vào pipe | `read()` không bị ngắt, vẫn nhận đúng dữ liệu | PASS — `killtest` T12 |
 | **DL-13** | Stress gửi signal đồng thời đa CPU | `CPUS=4`: 4 tiến trình × 200 `kill()` đồng thời vào 1 nạn nhân đang chặn; 4 tiến trình cùng `SIGKILL` 4 nạn nhân | Không mất bit pending (mỗi loại chạy handler đúng 1 lần), không panic / deadlock | PASS — `killtest` T11 |
 
@@ -101,25 +101,26 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 ## 3. Kịch bản Thực hiện 3 Yêu cầu Demo Cốt lõi
 
 ### Demo 1: Bắt phím `Ctrl+C` ngắt tiến trình lặp vô tận
-- **Chương trình user:** `user/loop_demo.c`
-- **Kịch bản:** Tiến trình in ra màn hình `Running...` liên tục mỗi giây. Người dùng nhấn tổ hợp phím `Ctrl+C` trên bàn phím:
-  - Bàn phím gửi ngắt $\to$ Kernel định tuyến `SIGINT` tới tiến trình.
-  - Handler in thông báo: `[DEMO 1] Caught Ctrl+C (SIGINT)! Cleaning up and exiting...`.
-  - Tiến trình thoát sạch sẽ.
+- **Chương trình user:** `user/ctrlc_demo.c`
+- **Kịch bản:**
+  - Chế độ có handler (`$ ctrlc_demo`): tiến trình in `Running...` mỗi 10 ticks. Người dùng nhấn `Ctrl+C`:
+    - Bàn phím gửi ngắt $\to$ Kernel in `^C` và định tuyến `SIGINT` tới tiến trình tiền cảnh.
+    - Handler in `[DEMO 1] Caught Ctrl+C (SIGINT)! Cleaning up and exiting...` và tiến trình thoát sạch (`exit(0)`), quay lại dấu nhắc `$ `.
+  - Chế độ mặc định (`$ ctrlc_demo dfl`): giữ `SIG_DFL`; nhấn `Ctrl+C` làm tiến trình bị kết thúc ngay, quay lại dấu nhắc `$ `.
+  - Tại dấu nhắc shell (`fg_pid == 0`): nhấn `Ctrl+C` in `^C`, xóa ký tự gõ dở và **không** làm thoát shell.
 
 ### Demo 2: Timer `alarm()` chạy tuần hoàn (Periodic Timer)
 - **Chương trình user:** `user/alarm_demo.c`
-- **Kịch bản:** Tiến trình gọi `alarm(10)` (khoảng 1 giây).
-  - Khi hết hạn, handler `SIGALRM` được kích hoạt, in thông báo `[DEMO 2] Tick: 1s elapsed`.
-  - Bên trong handler, gọi lại `alarm(10)` (Re-arm).
-  - Chương trình lặp lại đều đặn 5 lần rồi tự động hủy bằng `alarm(0)`.
+- **Kịch bản:** Tiến trình gọi `alarm(10)` (`PERIOD = 10` ticks, `ROUNDS = 5`) và chờ trong vòng lặp `pause(PERIOD * 3)`:
+  - Khi hết hạn, handler `on_alarm` của `SIGALRM` được kích hoạt, in `[DEMO 2] SIGALRM #<fired> at uptime=<t>`.
+  - Bên trong handler, nếu `fired < ROUNDS` thì gọi lại `alarm(10)` (re-arm).
+  - Chương trình lặp đủ 5 lần rồi kết thúc, in `[DEMO 2] done: 5 alarms, pause interrupted <n> times, elapsed=<dt> ticks`.
 
 ### Demo 3: Tín hiệu bị Chặn được Delivery ngay sau khi Unblock
 - **Chương trình user:** `user/mask_demo.c`
 - **Kịch bản:**
-  - Tiến trình gọi `sigprocmask(SIG_BLOCK)` chặn `SIGUSR1`.
-  - Tiến trình tự gửi tín hiệu cho chính mình: `kill(getpid(), SIGUSR1)`.
-  - Kiểm tra handler: **Chưa chạy**; in thông báo `Signal is masked, safely continuing work...`.
-  - Tiến trình gọi `sigprocmask(SIG_UNBLOCK)`.
-  - Ngay sau lời gọi unblock: Handler kích hoạt thành công và in `[DEMO 3] Handler executed immediately after unmask!`.
+  - Tiến trình cha gọi `sigprocmask(SIG_BLOCK, &set, 0)` chặn `SIGUSR1` và in `[DEMO 3] SIGUSR1 blocked`.
+  - Tiến trình con gửi `kill(me, SIGUSR1)` 3 lần cho cha rồi thoát.
+  - Cha kiểm tra handler **chưa chạy** (`handler count=0 (expect 0)`), thực hiện `pause(10)` trong lúc signal đang pending (`still count=0`).
+  - Cha gọi `sigprocmask(SIG_UNBLOCK, &set, 0)`: ngay khi trả về user mode, handler kích hoạt 1 lần (3 lần gửi được gộp bit) và in `[DEMO 3] handler: caught SIGUSR1 (count=1)`, sau đó in `[DEMO 3] after unblock: count=1 (expect 1, 3 sends coalesced)`.
 

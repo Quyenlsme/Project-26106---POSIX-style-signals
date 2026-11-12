@@ -260,7 +260,7 @@ Trong baseline xv6-riscv hiện hành, syscall đưa tiến trình vào trạng 
 
 ---
 
-## 9. Khảo sát Kiến trúc và Thiết kế Định tuyến Bắt phím `Ctrl-C` $\to$ `SIGINT`
+## 9. Kiến trúc và Hiện thực Định tuyến Bắt phím `Ctrl-C` $\to$ `SIGINT` (Tuần 4 — PA-1)
 
 ### 9.1. Luồng Nhận Ký tự từ Bàn phím trên xv6
 ```
@@ -268,7 +268,7 @@ Bàn phím -> UART Phần cứng -> Ngắt UART -> plic_claim() -> uartintr() ->
 ```
 Trong `kernel/console.c`, hàm `consoleintr(c)` tiếp nhận từng ký tự:
 - Đã hỗ trợ: `Ctrl-P` (`procdump`), `Ctrl-U` (xóa dòng), `Ctrl-H` / Delete (xóa ký tự), `Ctrl-D` (EOF).
-- **Chưa có nhánh xử lý `Ctrl-C` (`C('C')` = ASCII 0x03):** Hiện tại ký tự rơi vào nhánh `default`, được in ra màn hình và đẩy vào circular buffer `cons.buf` như ký tự thông thường.
+- **Đã bổ sung ở Tuần 4 (`case C('C')`):** Khi nhận `0x03`, kernel in `^C\n`, xóa phần ký tự chưa nhấn Enter (`cons.e = cons.w`), không đẩy `0x03` vào `cons.buf`, và nếu `fg_pid > 0` thì gọi `kkill(fg_pid, SIGINT)`.
 
 ### 9.2. Phân tích Các Phương án Xác định Foreground Process
 | Phương án | Cơ chế hoạt động | Ưu điểm | Nhược điểm | Đánh giá |
@@ -277,29 +277,13 @@ Trong `kernel/console.c`, hàm `consoleintr(c)` tiếp nhận từng ký tự:
 | **PA-2** | Bổ sung khái niệm Process Group (`p->pgid`) + syscall `setpgid()`. `Ctrl-C` gửi `SIGINT` cho toàn bộ nhóm tiến trình tiền cảnh. | Chuẩn POSIX, hỗ trợ ngắt toàn bộ pipeline. | Phức tạp, phải sửa `allocproc`, `kfork`, vòng đời tiến trình. | Để dành cho giai đoạn Stretch |
 | **PA-3** | Quét toàn bộ bảng `proc[]`, gửi `SIGINT` cho mọi tiến trình `pid > 2`. | Không cần sửa `sh.c`. | Giết nhầm cả tiến trình daemon/background (`&`). | Không dùng |
 
-### 9.3. Thiết kế Chi tiết Phương án 1 (PA-1)
-1. **Trong `kernel/console.c`:**
-   ```c
-   static int fg_pid = 0; // Bảo vệ bởi cons.lock
-
-   void console_setfg(int pid) {
-     acquire(&cons.lock);
-     fg_pid = pid;
-     release(&cons.lock);
-   }
-
-   void consoleintr(int c) {
-     acquire(&cons.lock);
-     switch (c) {
-     case C('C'):
-       consputc('^'); consputc('C'); consputc('\n');
-       if (fg_pid > 0) {
-         kkill(fg_pid, SIGINT);
-       }
-       break;
-     ...
-   ```
-2. **Trong `user/sh.c`:**
+### 9.3. Hiện thực Phương án 1 (PA-1) trên nhánh `feature/ctrlc-sigint`
+1. **Trong `kernel/console.c` và `kernel/defs.h`:**
+   - Thêm `static int fg_pid = 0;` (bảo vệ bởi `cons.lock`) và `void console_setfg(int pid)`.
+   - Thêm nhánh `case C('C'):` trong `consoleintr()`: in `^C\n`, đặt `cons.e = cons.w` để loại bỏ ký tự đang gõ dở, và gọi `kkill(fg_pid, SIGINT)` nếu `fg_pid > 0`.
+2. **Syscall `setfg(int pid)` (`SYS_setfg = 27`):**
+   - Khai báo trong `kernel/syscall.h`, `kernel/syscall.c`, `kernel/sysproc.c` (`sys_setfg` kiểm tra `pid < 0` trả về `-1`), `user/user.h` và `user/usys.pl`.
+3. **Trong `user/sh.c`:**
    ```c
    int pid = fork1();
    if (pid == 0)
@@ -308,7 +292,10 @@ Trong `kernel/console.c`, hàm `consoleintr(c)` tiếp nhận từng ký tự:
    wait(0);
    setfg(0);
    ```
-3. **Quy tắc An toàn và Locking Invariant:**
+   - Lệnh chạy nền (`&`) không bị `Ctrl-C` ngắt nhầm vì child trung gian thoát ngay sau khi fork grandchild.
+   - Giới hạn đã biết theo PA-1: chưa hỗ trợ ngắt trực tiếp các tiến trình cháu trong chuỗi pipeline `a | b`.
+4. **Quy tắc An toàn và Locking Invariant:**
    - `consoleintr` thực thi trong ngữ cảnh ngắt thiết bị. Hàm `kkill()` chỉ thao tác trên spinlock (`p->lock`), không gọi `sleep()` hay yield CPU, hoàn toàn an toàn khi gọi từ ngắt.
    - Handler của user **tuyệt đối không chạy trong interrupt context**: `kkill()` chỉ bật bit pending và đánh thức tiến trình. Handler sẽ được thực thi khi tiến trình tiền cảnh được lập lịch và quay về user qua `prepare_return()`.
    - Thứ tự khóa tuân thủ: `cons.lock -> p->lock` (nhất quán với `consoleread`).
+5. **Trạng thái kiểm thử (`DL-11`):** Đã hoàn tất mã nguồn (`user/ctrlc_demo.c`, `Makefile`), chờ chạy xác minh trên QEMU (`CPUS=1` và `CPUS=4`).
