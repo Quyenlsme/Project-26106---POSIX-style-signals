@@ -89,6 +89,15 @@ class QEMU(object):
 
     def error(self, *regexps):
         print("FAIL: match failed", regexps)
+
+        self.read()
+        output_lines = self.lines()[-40:]
+
+        if output_lines:
+            print("Last QEMU output:")
+            for line in output_lines:
+                print(line)
+
         self.save_output()
         self.stop()
         sys.exit(1)
@@ -138,10 +147,10 @@ def crash_log(delay=2):
 def recover_log():
     q = QEMU()
 
-    # Cho QEMU chạy đến khi xv6 bắt đầu khởi chạy shell.
-    q.monitor('^init: starting sh', timeout=30)
+    # Cho đến khi shell xuất hiện dấu nhắc lệnh.
+    q.monitor(r'^\$ ', timeout=30)
 
-    # Kiểm tra thông báo phục hồi log trong toàn bộ output đã đọc.
+    # Kiểm tra thông báo phục hồi log.
     ok = q.match('^recovering', exit=False)
 
     if ok:
