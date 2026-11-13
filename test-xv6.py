@@ -128,21 +128,26 @@ class QEMU(object):
             if self.match(*regexps, exit=False):
                 return
 
-def crash_log():
+def crash_log(delay=2):
     q = QEMU(True)
     q.cmd("logstress f0 f1 f2 f3 f4 f5\n")
-    time.sleep(2)
+    time.sleep(delay)
     q.crash()
     q.stop()
 
 def recover_log():
     q = QEMU()
-    time.sleep(2)
-    q.read()
+
+    # Cho QEMU chạy đến khi xv6 bắt đầu khởi chạy shell.
+    q.monitor('^init: starting sh', timeout=30)
+
+    # Kiểm tra thông báo phục hồi log trong toàn bộ output đã đọc.
     ok = q.match('^recovering', exit=False)
+
     if ok:
         q.cmd("ls\n")
         q.monitor('f5', timeout=30)
+
     q.stop()
     return ok
 
@@ -167,13 +172,21 @@ def recover_orphan():
 
 def test_log():
     print("Test recovery of log")
+
     for i in range(20):
-        crash_log()
+        delay = 1.0 + i * 0.15
+
+        print(f"Crash attempt {i + 1}, delay = {delay:.2f}s")
+
+        crash_log(delay)
         ok = recover_log()
+
         if ok:
             print("OK")
             return
-        print("log attempt ", i+1)
+
+        print("log attempt", i + 1)
+
     print("FAIL")
     sys.exit(1)
     
