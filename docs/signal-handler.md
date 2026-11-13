@@ -243,10 +243,15 @@ if (num == SYS_sigreturn) {
 3. Handler A kết thúc -> gọi `sigreturn()` lần 2:
    - Kernel giải phóng khung của A, khôi phục lại trạng thái ban đầu của chương trình chính.
 4. **Cơ chế chống tràn ngăn xếp (Recursion Prevention):** Nhờ cơ chế tự động đưa chính tín hiệu đang xử lý vào mặt nạ chặn (`blocked_signals |= (1U << sig)`), nếu một tín hiệu cùng loại liên tục gửi đến, nó sẽ bị giữ ở trạng thái `pending` chứ không kích hoạt lồng đệ quy vô hạn làm sập stack.
-
+5. **Giới hạn độ sâu lồng nhau (Stack Limit):**
+   - Cơ chế nested handler sử dụng chính User Stack của tiến trình để lưu các `sigframe`.
+   - Trong thiết kế hiện tại, mỗi tiến trình có `USERSTACK = 1` (một trang User Stack).
+   - Mỗi lần phát sinh nested handler, kernel cần dành thêm không gian trên User Stack để lưu `sigframe` mới.
+   - Do dung lượng User Stack có giới hạn, độ sâu nested handler cũng bị giới hạn bởi không gian stack còn lại.
+   - Nếu không đủ không gian để đặt `sigframe`, thao tác dựng signal frame thất bại và tiến trình bị kết thúc với trạng thái `-1`, thay vì làm kernel panic.
 ---
 
-## 7. Ma trận Kiểm thử Module Handler (HD-01 đến HD-10)
+## 7. Ma trận Kiểm thử Module Handler (HD-01 đến HD-13)
 
 | Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi |
 |---|---|---|---|
@@ -260,3 +265,6 @@ if (num == SYS_sigreturn) {
 | **HD-08** | Chống đệ quy lặp cùng signal | Trong handler `SIGUSR1`, gửi lại chính `SIGUSR1` | Signal mới bị pending, không bị lồng đệ quy tràn stack |
 | **HD-09** | Xử lý Bad Stack Frame | Cố tình gọi `sigreturn()` với con trỏ stack không căn lề hoặc trỏ ra ngoài bộ nhớ | Kernel gọi `kexit(-1)` diệt tiến trình an toàn, không panic |
 | **HD-10** | Căn lề Stack 16-byte | Đọc giá trị thanh ghi `sp` ngay dòng đầu tiên của hàm handler | `sp % 16 == 0` tuyệt đối |
+| **HD-11** | Nested Handlers 3 tầng | Handler `SIGUSR1` gửi tiếp `SIGUSR2`; Handler `SIGUSR2` gửi tiếp `SIGALRM` | Ba handler được thực thi đúng thứ tự lồng nhau; unwind theo LIFO; signal mask được khôi phục chính xác |
+| **HD-12** | User Stack không đủ chỗ chứa Signal Frame | Cố tình đặt `sp` tại vị trí không đủ không gian để kernel ghi `sigframe` | Tiến trình con kết thúc với trạng thái `-1`; kernel không panic |
+| **HD-13** | Burst / Multiple Pending Signals | Chặn `SIGUSR1`, `SIGUSR2`, `SIGALRM`, gửi theo thứ tự ngược rồi bỏ chặn | Cả ba signal được xử lý đúng một lần theo thứ tự số hiệu tăng dần; các thanh ghi `s1-s11` được bảo toàn |
