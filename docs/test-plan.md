@@ -27,7 +27,7 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ## 2. Ma trận Kiểm thử Chi tiết theo Module
 
-### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-13`)
+### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-16`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
@@ -41,13 +41,16 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **DL-08** | Hành vi mặc định `SIG_DFL` | Không đặt handler, gửi `SIGUSR1` / `SIGTERM` | Tiến trình kết thúc ngay lập tức với exit code -1 | PASS — `killtest` T5, T6 |
 | **DL-09** | Bỏ qua tín hiệu `SIG_IGN` | Đặt `SIG_IGN` cho `SIGUSR1`, gửi cho chính mình và gửi khi đang chờ `read()` | Tín hiệu bị tiêu thụ, tiến trình không bị ngắt, `read()` vẫn nhận dữ liệu | PASS — `killtest` T9 |
 | **DL-10** | Đánh thức tiến trình SLEEPING | Con chờ trên `read()` pipe, cha gửi `SIGKILL` / `SIGTERM` / `SIGUSR1` (có handler); lặp 500 vòng gửi đúng lúc con vừa vào `read()` | Con được đánh thức; `SIG_DFL` → thoát `-1`; có handler → `read()` trả `-1`, handler chạy, con chạy tiếp; 0 lần mất wakeup | PASS — `killtest` T4, T6, T10 |
-| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chưa chạy — đã hoàn tất code trên nhánh `feature/ctrlc-sigint`, chờ kiểm thử QEMU |
+| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | PASS — `ctrlc_demo` (handler & SIG_DFL) và shell prompt trên CPUS=1, CPUS=4 |
 | **DL-12** | Signal bị chặn không ngắt syscall | Chặn `SIGUSR2`, tiến trình đang chờ `read()`, gửi `SIGUSR2` rồi ghi dữ liệu vào pipe | `read()` không bị ngắt, vẫn nhận đúng dữ liệu | PASS — `killtest` T12 |
 | **DL-13** | Stress gửi signal đồng thời đa CPU | `CPUS=4`: 4 tiến trình × 200 `kill()` đồng thời vào 1 nạn nhân đang chặn; 4 tiến trình cùng `SIGKILL` 4 nạn nhân | Không mất bit pending (mỗi loại chạy handler đúng 1 lần), không panic / deadlock | PASS — `killtest` T11 |
+| **DL-14** | Gửi signal tới tiến trình ZOMBIE | Con `exit(7)` ngay, cha chưa `wait`, gửi `kill(pid, SIGUSR1)` | `kill()` trả `-1`; `wait()` vẫn nhận đúng status `7` | PASS — `killtest` T13 |
+| **DL-15** | SIGKILL khi đã chặn hết và đang `pause` | Con `sigprocmask(SIG_SETMASK, 0xFFFFFFFF)` rồi `pause(0x7fffffff)`; cha gửi `SIGKILL` | Mask thực tế không chứa `SIGKILL`; con kết thúc với status `-1`, không treo | PASS — `killtest` T14 |
+| **DL-16** | Tự gửi signal có handler | Đăng ký handler `SIGUSR1`, gọi `kill(getpid(), SIGUSR1)` | Handler đã chạy xong ngay khi `kill()` trả về | PASS — `killtest` T15 |
 
 ---
 
-### 2.2. Module Handler & Context — Trần Việt Hưng (`HD-01` đến `HD-10`)
+### 2.2. Module Handler & Context — Trần Việt Hưng (`HD-01` đến `HD-13`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
@@ -61,6 +64,9 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **HD-08** | Chống đệ quy lặp cùng signal | Trong handler `SIGUSR1`, gửi lại chính `SIGUSR1` | Signal mới bị pending do tự động mask, không lồng đệ quy tràn stack | PASS — `regtest` REG-30 |
 | **HD-09** | Xử lý Bad Stack Frame | Gọi `sigreturn()` với con trỏ stack không căn lề hoặc trỏ ra ngoài | Kernel gọi `kexit(-1)` diệt tiến trình an toàn, không panic | PASS — `regtest` REG-31 |
 | **HD-10** | Căn lề Stack 16-byte | Đọc giá trị thanh ghi `sp` ngay đầu hàm handler | `sp % 16 == 0` tuyệt đối theo RISC-V ABI | PASS — `regtest` REG-32 |
+| **HD-11** | Nested Handlers 3 tầng | Handler `SIGUSR1` gửi tiếp `SIGUSR2`; Handler `SIGUSR2` gửi tiếp `SIGALRM` | Ba handler được thực thi đúng thứ tự lồng nhau; unwind theo LIFO; signal mask được khôi phục chính xác | PASS — `regtest` REG-34 |
+| **HD-12** | User Stack không đủ chỗ chứa Signal Frame | Cố tình đặt `sp` tại vị trí không đủ không gian để kernel ghi `sigframe` | Tiến trình con kết thúc với trạng thái `-1`; kernel không panic | PASS — `regtest` REG-35 |
+| **HD-13** | Burst / Multiple Pending Signals | Chặn `SIGUSR1`, `SIGUSR2`, `SIGALRM`, gửi theo thứ tự ngược rồi bỏ chặn | Cả ba signal được xử lý đúng một lần theo thứ tự số hiệu tăng dần; các thanh ghi `s1-s11` được bảo toàn | PASS — `regtest` REG-36 |
 
 ---
 
