@@ -120,6 +120,121 @@ reg33_clobber_handler(int sig)
                    "a4", "a5", "a6", "a7");
 }
 
+// Bien va handler phuc vu REG-34 (HD-11: Nested handlers 3 tang)
+static volatile int reg34_log[6];
+static volatile int reg34_count = 0;
+static volatile int reg34_error = 0;
+
+void
+reg34_usr1_handler(int sig)
+{
+  if (sig != SIGUSR1) {
+    reg34_error = 1;
+    return;
+  }
+
+  if (reg34_count < 6)
+    reg34_log[reg34_count++] = 1;
+  else
+    reg34_error = 1;
+
+  if (kill(getpid(), SIGUSR2) < 0)
+    reg34_error = 1;
+
+  if (reg34_count < 6)
+    reg34_log[reg34_count++] = 6;
+  else
+    reg34_error = 1;
+}
+
+void
+reg34_usr2_handler(int sig)
+{
+  if (sig != SIGUSR2) {
+    reg34_error = 1;
+    return;
+  }
+
+  if (reg34_count < 6)
+    reg34_log[reg34_count++] = 2;
+  else
+    reg34_error = 1;
+
+  if (kill(getpid(), SIGALRM) < 0)
+    reg34_error = 1;
+
+  if (reg34_count < 6)
+    reg34_log[reg34_count++] = 5;
+  else
+    reg34_error = 1;
+}
+
+void
+reg34_alrm_handler(int sig)
+{
+  if (sig != SIGALRM) {
+    reg34_error = 1;
+    return;
+  }
+
+  if (reg34_count < 6)
+    reg34_log[reg34_count++] = 3;
+  else
+    reg34_error = 1;
+
+  if (reg34_count < 6)
+    reg34_log[reg34_count++] = 4;
+  else
+    reg34_error = 1;
+}
+
+void
+reg35_handler(int sig)
+{
+  // Handler khong can thuc hien gi.
+}
+
+// Bien va handler phuc vu REG-36 (HD-13)
+static volatile int reg36_order[3];
+static volatile int reg36_count = 0;
+static volatile int reg36_error = 0;
+
+void
+reg36_usr1_handler(int sig)
+{
+  if (sig != SIGUSR1)
+    reg36_error = 1;
+
+  if (reg36_count < 3)
+    reg36_order[reg36_count++] = SIGUSR1;
+  else
+    reg36_error = 1;
+}
+
+void
+reg36_usr2_handler(int sig)
+{
+  if (sig != SIGUSR2)
+    reg36_error = 1;
+
+  if (reg36_count < 3)
+    reg36_order[reg36_count++] = SIGUSR2;
+  else
+    reg36_error = 1;
+}
+
+void
+reg36_alrm_handler(int sig)
+{
+  if (sig != SIGALRM)
+    reg36_error = 1;
+
+  if (reg36_count < 3)
+    reg36_order[reg36_count++] = SIGALRM;
+  else
+    reg36_error = 1;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1293,6 +1408,304 @@ main(int argc, char *argv[])
       printf("  a1-a7: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
              out_regs[7], out_regs[8], out_regs[9], out_regs[10], out_regs[11],
              out_regs[12], out_regs[13]);
+      exit(1);
+    }
+  }
+
+  // REG-34: HD-11 - Nested handlers 3 tang, unwind theo thu tu LIFO
+  {
+    struct sigaction act1, act2, act3;
+    struct sigaction old1, old2, old3;
+    sigset_t oldmask;
+    sigset_t set;
+    int expected[6] = {1, 2, 3, 4, 5, 6};
+    int pass = 1;
+
+    memset(&act1, 0, sizeof(act1));
+    memset(&act2, 0, sizeof(act2));
+    memset(&act3, 0, sizeof(act3));
+
+    act1.sa_handler = reg34_usr1_handler;
+    act2.sa_handler = reg34_usr2_handler;
+    act3.sa_handler = reg34_alrm_handler;
+
+    act1.sa_mask = 0;
+    act2.sa_mask = 0;
+    act3.sa_mask = 0;
+
+    act1.sa_restorer = sigrestorer;
+    act2.sa_restorer = sigrestorer;
+    act3.sa_restorer = sigrestorer;
+
+    if (sigprocmask(SIG_BLOCK, 0, &oldmask) < 0) {
+      printf("REG-34 FAIL: cannot read original signal mask\n");
+      exit(1);
+    }
+
+    if (sigaction(SIGUSR1, &act1, &old1) < 0 ||
+        sigaction(SIGUSR2, &act2, &old2) < 0 ||
+        sigaction(SIGALRM, &act3, &old3) < 0) {
+      printf("REG-34 FAIL: cannot register handlers\n");
+      exit(1);
+    }
+
+    reg34_count = 0;
+    reg34_error = 0;
+    memset((void *)reg34_log, 0, sizeof(reg34_log));
+
+    set = (1U << SIGUSR1) | (1U << SIGUSR2) | (1U << SIGALRM);
+
+    if (sigprocmask(SIG_UNBLOCK, &set, 0) < 0) {
+      printf("REG-34 FAIL: cannot unblock signals\n");
+      exit(1);
+    }
+
+    if (kill(getpid(), SIGUSR1) < 0) {
+      printf("REG-34 FAIL: cannot send SIGUSR1\n");
+      exit(1);
+    }
+
+    if (reg34_error || reg34_count != 6)
+      pass = 0;
+
+    for (int i = 0; i < 6; i++) {
+      if (reg34_log[i] != expected[i])
+        pass = 0;
+    }
+
+    sigset_t current_mask;
+    if (sigprocmask(SIG_BLOCK, 0, &current_mask) < 0 ||
+        current_mask != (oldmask & ~(set))) {
+      pass = 0;
+    }
+
+    sigaction(SIGUSR1, &old1, 0);
+    sigaction(SIGUSR2, &old2, 0);
+    sigaction(SIGALRM, &old3, 0);
+    sigprocmask(SIG_SETMASK, &oldmask, 0);
+
+    if (pass) {
+      printf(
+        "REG-34 PASS: Three-level nested handlers unwind in LIFO order and restore signal mask (HD-11)\n");
+    } else {
+      printf("REG-34 FAIL: count=%d, error=%d, log=", reg34_count, reg34_error);
+      for (int i = 0; i < reg34_count && i < 6; i++)
+        printf("%d ", reg34_log[i]);
+      printf("\n");
+      exit(1);
+    }
+  }
+
+  // REG-35: HD-12 - Signal frame khong du cho tren user stack
+  {
+    int pid = fork();
+
+    if (pid < 0) {
+      printf("REG-35 FAIL: fork\n");
+      exit(1);
+    }
+
+    if (pid == 0) {
+      struct sigaction act;
+      memset(&act, 0, sizeof(act));
+      act.sa_handler = reg35_handler;
+      act.sa_restorer = sigrestorer;
+
+      if (sigaction(SIGUSR1, &act, 0) < 0)
+        exit(2);
+
+      int self = getpid();
+
+      // sbrk(0) tra ve p->sz.
+      // Stack chiem mot trang ngay duoi p->sz.
+      uint64 stackbase = (uint64)sbrk(0) - 4096;
+
+      // Dat sp tai stackbase + 288.
+      // sigframe co kich thuoc 296 byte, nen frame se lan
+      // xuong guard page.
+      uint64 test_sp = stackbase + 288;
+
+      // Goi truc tiep syscall kill, khong tao them stack frame
+      // sau khi da dieu chinh sp.
+      asm volatile("mv sp, %0\n"
+                   "mv a0, %1\n"
+                   "li a1, 10\n"
+                   "li a7, 6\n"
+                   "ecall\n"
+                   :
+                   : "r"(test_sp), "r"(self)
+                   : "a0", "a1", "a7", "memory");
+
+      // Neu van tiep tuc duoc, kernel khong kill dung cach.
+      exit(3);
+    }
+
+    int status = 0;
+    int waited = wait(&status);
+
+    if (waited == pid && status == -1) {
+      printf(
+        "REG-35 PASS: Insufficient user stack for signal frame terminates child with status -1 (HD-12)\n");
+    } else {
+      printf("REG-35 FAIL: waited=%d, status=%d\n", waited, status);
+      exit(1);
+    }
+  }
+
+  // REG-36: HD-13 - Burst/multiple pending signals
+  {
+    struct sigaction act1, act2, act3;
+    struct sigaction old1, old2, old3;
+    sigset_t set, oldmask;
+    uint64 out_regs[11];
+
+    int expected[3] = {SIGUSR1, SIGUSR2, SIGALRM};
+    int pass = 1;
+
+    // Tao tap hop ba tin hieu.
+    set = (1U << SIGUSR1) | (1U << SIGUSR2) | (1U << SIGALRM);
+
+    // Chan ca ba tin hieu va luu mask cu.
+    if (sigprocmask(SIG_BLOCK, &set, &oldmask) < 0) {
+      printf("REG-36 FAIL: cannot block signals\n");
+      exit(1);
+    }
+
+    // Dang ky ba handler.
+    memset(&act1, 0, sizeof(act1));
+    memset(&act2, 0, sizeof(act2));
+    memset(&act3, 0, sizeof(act3));
+
+    act1.sa_handler = reg36_usr1_handler;
+    act2.sa_handler = reg36_usr2_handler;
+    act3.sa_handler = reg36_alrm_handler;
+
+    // Khi mot handler chay, chan ca ba tin hieu.
+    act1.sa_mask = set;
+    act2.sa_mask = set;
+    act3.sa_mask = set;
+
+    act1.sa_restorer = sigrestorer;
+    act2.sa_restorer = sigrestorer;
+    act3.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGUSR1, &act1, &old1) < 0 ||
+        sigaction(SIGUSR2, &act2, &old2) < 0 ||
+        sigaction(SIGALRM, &act3, &old3) < 0) {
+      printf("REG-36 FAIL: sigaction\n");
+      exit(1);
+    }
+
+    // Reset bien theo doi.
+    reg36_count = 0;
+    reg36_error = 0;
+
+    for (int i = 0; i < 3; i++)
+      reg36_order[i] = 0;
+
+    // Gui ba tin hieu trong khi chung dang bi chan.
+    if (kill(getpid(), SIGALRM) < 0 || kill(getpid(), SIGUSR2) < 0 ||
+        kill(getpid(), SIGUSR1) < 0) {
+      printf("REG-36 FAIL: cannot send signals\n");
+      exit(1);
+    }
+
+    // Cac tin hieu chua duoc xu ly vi dang bi chan.
+    if (reg36_count != 0)
+      pass = 0;
+
+    // Dat gia tri ban dau cho cac thanh ghi s1-s11.
+    // Sau do bo chan tin hieu bang syscall truc tiep.
+    // Cac syscall getpid tiep theo tao them cac diem
+    // quay ve user mode de xu ly cac tin hieu dang pending.
+    asm volatile("li s1, 0x101\n"
+                 "li s2, 0x102\n"
+                 "li s3, 0x103\n"
+                 "li s4, 0x104\n"
+                 "li s5, 0x105\n"
+                 "li s6, 0x106\n"
+                 "li s7, 0x107\n"
+                 "li s8, 0x108\n"
+                 "li s9, 0x109\n"
+                 "li s10, 0x10a\n"
+                 "li s11, 0x10b\n"
+
+                 // sigprocmask(SIG_UNBLOCK, &set, 0)
+                 "li a0, 1\n"
+                 "mv a1, %0\n"
+                 "li a2, 0\n"
+                 "li a7, 25\n"
+                 "ecall\n"
+
+                 // Tao cac lan quay ve user mode tiep theo.
+                 "li a7, 11\n"
+                 "ecall\n"
+                 "li a7, 11\n"
+                 "ecall\n"
+                 "li a7, 11\n"
+                 "ecall\n"
+
+                 // Luu lai cac thanh ghi sau khi cac handler ket thuc.
+                 "sd s1, 0(%1)\n"
+                 "sd s2, 8(%1)\n"
+                 "sd s3, 16(%1)\n"
+                 "sd s4, 24(%1)\n"
+                 "sd s5, 32(%1)\n"
+                 "sd s6, 40(%1)\n"
+                 "sd s7, 48(%1)\n"
+                 "sd s8, 56(%1)\n"
+                 "sd s9, 64(%1)\n"
+                 "sd s10, 72(%1)\n"
+                 "sd s11, 80(%1)\n"
+                 :
+                 : "r"(&set), "r"(out_regs)
+                 : "a0", "a1", "a2", "a7", "s1", "s2", "s3", "s4", "s5", "s6",
+                   "s7", "s8", "s9", "s10", "s11", "memory");
+
+    // Kiem tra ca ba handler da duoc goi dung mot lan.
+    if (reg36_count != 3 || reg36_error)
+      pass = 0;
+
+    // Kiem tra thu tu tang dan theo so hieu tin hieu.
+    for (int i = 0; i < 3; i++) {
+      if (reg36_order[i] != expected[i])
+        pass = 0;
+    }
+
+    // Kiem tra cac thanh ghi s1-s11 duoc khoi phuc.
+    for (int i = 0; i < 11; i++) {
+      if (out_regs[i] != (uint64)(0x101 + i))
+        pass = 0;
+    }
+
+    sigset_t current_mask;
+
+    if (sigprocmask(SIG_BLOCK, 0, &current_mask) < 0 ||
+        current_mask != (oldmask & ~set)) {
+      pass = 0;
+    }
+
+    // Khoi phuc handler va signal mask ban dau.
+    sigaction(SIGUSR1, &old1, 0);
+    sigaction(SIGUSR2, &old2, 0);
+    sigaction(SIGALRM, &old3, 0);
+    sigprocmask(SIG_SETMASK, &oldmask, 0);
+
+    if (pass) {
+      printf(
+        "REG-36 PASS: Burst signals delivered exactly once in increasing order and s1-s11 preserved (HD-13)\n");
+    } else {
+      printf("REG-36 FAIL: count=%d, error=%d, order=", reg36_count,
+             reg36_error);
+
+      for (int i = 0; i < reg36_count && i < 3; i++)
+        printf("%d ", reg36_order[i]);
+
+      printf("\n");
+      for (int i = 0; i < 11; i++)
+        printf("s%d expected=0x%x actual=0x%lx\n", i + 1, 0x101 + i,
+               out_regs[i]);
+
       exit(1);
     }
   }
