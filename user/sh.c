@@ -169,9 +169,12 @@ main(void)
       if (chdir(cmd + 3) < 0)
         fprintf(2, "cannot cd %s\n", cmd + 3);
     } else {
-      if (fork1() == 0)
+      int pid = fork1();
+      if (pid == 0)
         runcmd(parsecmd(cmd));
+      setfg(pid);
       wait(0);
+      setfg(0);
     }
   }
   exit(0);

@@ -114,7 +114,6 @@ sys_uptime(void)
   return xticks;
 }
 
-// --- Signal syscall stubs (Tuần 2: chỉ là khung, trả 0) ---
 uint64
 sys_sigaction(void)
 {
@@ -282,4 +281,17 @@ sys_alarm(void)
   release(&p->lock);
 
   return remaining;
+}
+
+uint64
+sys_setfg(void)
+{
+  int pid;
+
+  argint(0, &pid);
+  if (pid < 0)
+    return -1;
+
+  console_setfg(pid);
+  return 0;
 }

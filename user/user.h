@@ -30,6 +30,7 @@ int sigaction(int, const struct sigaction *, struct sigaction *);
 int sigreturn(void);
 int sigprocmask(int, const unsigned int *, unsigned int *);
 int alarm(int);
+int setfg(int);
 
 // ulib.c
 int stat(const char *, struct stat *);

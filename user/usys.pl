@@ -47,3 +47,4 @@ entry("sigaction");
 entry("sigreturn");
 entry("sigprocmask");
 entry("alarm");
+entry("setfg");
