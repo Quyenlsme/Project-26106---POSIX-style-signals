@@ -122,3 +122,56 @@ if (p->killed)      // kernel/trap.c, đọc trần
 |---|---|---|---|---|---|
 | `CPUS=1` | 38/38 PASS × 3 lần | ALL PASSED | 12/12 | OK | ALL TESTS PASSED |
 | `CPUS=4` | 38/38 PASS × 3 lần | ALL PASSED | 12/12 | OK | ALL TESTS PASSED |
+
+---
+
+## 6. Lock order cho Ctrl-C → SIGINT (Tuần 4)
+
+Rà soát nhánh `feature/ctrlc-sigint` (commit `6110b6d`, Kiên). Đường đi khi người dùng bấm Ctrl-C:
+
+```
+UART interrupt → devintr() → uartintr() → consoleintr(0x03)
+    acquire(&cons.lock)
+    in "^C", bỏ dòng đang gõ dở (cons.e = cons.w)
+    if (fg_pid > 0) kkill(fg_pid, SIGINT)
+        └─ với từng proc: acquire(&p->lock) … sig_send() … release(&p->lock)
+    release(&cons.lock)
+```
+
+### 6.1. Mọi chỗ lấy `cons.lock`
+
+| Hàm | Đang giữ khóa nào trước khi lấy `cons.lock` | Lấy thêm khóa nào khi đang giữ `cons.lock` |
+|---|---|---|
+| `consoleintr()` (ngắt UART) | không | `p->lock` (qua `kkill` → `sig_send`) |
+| `consoleread()` (syscall `read`) | không | `p->lock` (qua `sig_interrupted`, `sleep_prepare_intr`) |
+| `console_setfg()` (syscall `setfg`) | không | không |
+
+Không có đường code nào **đang giữ `p->lock` rồi mới lấy `cons.lock`**: `sig_send()`, `sleep()`, `sched()`, `procdump()` đều không đụng tới `cons.lock`. Vì vậy thứ tự khóa trong toàn hệ thống luôn là **`cons.lock → p->lock`**, cùng chiều với các khóa điều kiện khác ở §3 ⇒ **không thể xảy ra deadlock** kiểu hai luồng giữ hai khóa theo thứ tự ngược nhau (ví dụ `wait(S); wait(Q)` / `wait(Q); wait(S)` trong slide Chương 2).
+
+### 6.2. Gọi `kkill()` từ ngữ cảnh ngắt có an toàn không
+
+* `kkill()` và `sig_send()` **chỉ dùng spinlock** (`p->lock`) và **không gọi `sleep()`**: chỉ ghi bit pending, xóa `p->chan`, đổi `SLEEPING → RUNNABLE`. Đây đúng là các thao tác được phép làm trong trình xử lý ngắt.
+* **Cùng một CPU:** `acquire()` gọi `push_off()` tắt ngắt trên CPU đó. Khi một CPU đang giữ `p->lock` (trong syscall `kill`, trong `sleep()`…), ngắt UART không thể chen vào **trên chính CPU đó** để gọi `consoleintr()` → không có chuyện CPU tự chờ khóa của chính mình.
+* **Khác CPU:** CPU A đang chạy `consoleintr()` giữ `cons.lock` và chờ `p->lock` mà CPU B đang giữ. CPU B chỉ giữ `p->lock` trong các đoạn ngắn không bao giờ chờ `cons.lock` (§6.1) → B nhả khóa, A chạy tiếp.
+* `consoleintr()` giữ `cons.lock` trong lúc `kkill()` duyệt bảng tiến trình (tối đa `NPROC` = 64 lần `acquire/release`). Thời gian giữ khóa ngắn, chấp nhận được — giống `procdump()` (Ctrl-P) vốn cũng duyệt bảng tiến trình khi giữ `cons.lock`.
+
+### 6.3. Tương tác với tiến trình foreground đang ngủ
+
+* Tiến trình foreground đang chờ trong `consoleread()`, `pause()`, `wait()`, pipe: `sig_send()` xóa `p->chan` và đánh thức; vòng chờ dùng `sleep_prepare_intr()` nên **không mất wakeup** (§4.1) → syscall trả `-1`, `sig_deliver()` giao `SIGINT` (chạy handler hoặc `SIG_DFL` kết thúc).
+* `fg_pid` trỏ tới tiến trình đã thoát (giữa lúc con `exit` và lúc shell gọi `setfg(0)`): `kkill()` bỏ qua `UNUSED`/`ZOMBIE` và trả `-1`, không ảnh hưởng gì.
+
+### 6.4. Giới hạn đã biết (không phải lỗi đồng bộ)
+
+* **Khe trước `setfg(pid)`:** `sh.c` gọi `setfg(pid)` sau `fork1()`; nếu Ctrl-C được bấm trong khoảng rất ngắn trước lời gọi này thì `fg_pid` còn là 0 và phím bị bỏ qua.
+* **Pipeline / lệnh lồng:** `fg_pid` là tiến trình con trực tiếp của shell; các tiến trình cháu (ví dụ `a | b`) không nhận `SIGINT` (không làm process group – phương án PA-2 để dành cho stretch).
+* **Ctrl-C tại dấu nhắc:** shell không bị kết thúc (đúng yêu cầu), dòng đang gõ bị bỏ, nhưng shell không in lại dấu nhắc `$` mới cho tới khi người dùng gõ lệnh tiếp.
+
+### 6.5. Bằng chứng kiểm thử (bản gộp `feature/signal-edge-w4` + `feature/ctrlc-sigint`)
+
+| Tình huống DL-11 | `CPUS=1` | `CPUS=4` |
+|---|---|---|
+| Ctrl-C tại dấu nhắc shell → shell vẫn sống, nhận lệnh tiếp | PASS | PASS |
+| `ctrlc_demo` (có handler) → handler chạy, in thông báo, thoát, về dấu nhắc | PASS | PASS |
+| `ctrlc_demo dfl` (`SIG_DFL`) → tiến trình kết thúc, về dấu nhắc | PASS | PASS |
+
+Cùng bản gộp: `killtest` 47/47 PASS (`CPUS=1` và `CPUS=4`), `usertests -q` ALL TESTS PASSED (`CPUS=4`).
