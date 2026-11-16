@@ -10,6 +10,7 @@ jobs:
       - run: make kernel/kernel fs.img
       - run: ./test-xv6.py usertests
       - run: ./test-xv6.py crash
+      - run: python3 ./test-signals.py
 
   macos:
     runs-on: macos-latest

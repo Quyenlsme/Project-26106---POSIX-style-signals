@@ -1,0 +1,55 @@
+qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel -m 128M -smp 3 -nographic -global virtio-mmio.force-legacy=false -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+init: starting sh
+$ sigtest
+
+========================================
+  SIGNAL SYSTEM INTEGRATION TEST (WEEK 3)
+========================================
+
+=== 1. Test sigprocmask ===
+  [PASS] SIG_BLOCK SIGUSR1 (ret=0, oldmask=0x0)
+  [PASS] Query current mask with set=NULL (mask=0x400)
+  [PASS] Invariant: SIGKILL cannot be blocked (mask=0x400)
+  [PASS] SIG_UNBLOCK SIGUSR1 (ret=0, cur_mask=0x0)
+  [PASS] Invalid how=99 rejected with -1
+  => sigprocmask tests: ALL PASSED
+
+=== 2. Test alarm ===
+  [PASS] First alarm(10) returned 0
+  [PASS] Replaced alarm(25), remaining ticks returned: 10
+  [PASS] Canceled alarm(0), remaining ticks returned: 25
+  [PASS] Verified clean state after cancel
+  [PASS] Negative ticks rejected with -1
+  [PASS] AL-07: child does not inherit alarm deadline after fork
+  => alarm tests: ALL PASSED
+
+=== 3. Test sigaction ===
+  [PASS] sigaction(SIGUSR1, SIG_IGN) succeeded
+  [PASS] Invariant: SIGKILL cannot be modified
+  [PASS] Invalid signal numbers rejected
+  [PASS] Registered custom_handler and retrieved oldact correctly
+  => sigaction tests: ALL PASSED
+
+=== 4. Test kill ===
+  [PASS] Invalid signal numbers rejected
+  [PASS] Non-existent PID rejected
+  => kill tests: ALL PASSED
+
+=== 5. Test Mask -> Pending -> Unmask Delivery ===
+  -> Sending SIGUSR1 to self while BLOCKED...
+  [PASS] Signal remained pending, handler not called yet
+  -> Unblocking SIGUSR1...
+  -> [Handler] Received signal 10 (count=1)
+  [PASS] Pending signal delivered immediately upon unblock!
+  => Mask & Delivery integration: ALL PASSED
+
+========================================
+  ALL TESTS PASSED SUCCESSFULLY!
+========================================
+
+$ 

@@ -104,6 +104,16 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ---
 
+### 2.5. Nhóm Tự động hóa Kiểm thử & CI — Nguyễn Trung Kiên (`AU-01` đến `AU-03`)
+
+| Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
+|---|---|---|---|---|
+| **AU-01** | Tự động hóa Unit tests | Script python chạy lần lượt `killtest`, `regtest`, `sigtest`, `pausetest` | Bắt kết quả ALL PASSED/0 FAIL, không panic/treo | PASS — `test-signals.py` / `test-xv6.py signals` |
+| **AU-02** | Tự động hóa 2 Demo | Script chạy `alarm_demo` và `mask_demo` | Bắt đúng output `5 alarms` và `after unblock: count=1` | PASS — `test-signals.py` / `test-xv6.py signals` |
+| **AU-03** | Tự động hóa DL-11 (Ctrl-C) | Script inject byte `0x03` qua stdin QEMU vào: shell prompt, `ctrlc_demo` (handler), `ctrlc_demo dfl` | Shell sống, handler bắt đúng, DFL kết thúc tiến trình | PASS — `test-signals.py` / `test-xv6.py signals` |
+
+---
+
 ## 3. Kịch bản Thực hiện 3 Yêu cầu Demo Cốt lõi
 
 ### Demo 1: Bắt phím `Ctrl+C` ngắt tiến trình lặp vô tận

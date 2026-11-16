@@ -170,8 +170,10 @@ main(void)
         fprintf(2, "cannot cd %s\n", cmd + 3);
     } else {
       int pid = fork1();
-      if (pid == 0)
+      if (pid == 0) {
+        setfg(getpid());
         runcmd(parsecmd(cmd));
+      }
       setfg(pid);
       wait(0);
       setfg(0);
