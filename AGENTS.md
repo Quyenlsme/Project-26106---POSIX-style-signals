@@ -1,5 +1,7 @@
 # Hướng dẫn AI làm việc với dự án POSIX-style signals trên xv6-riscv
 
+*Cập nhật: 20/11/2026, sau tuần 4 (`main@1e875f9`). Bản đầu: 24/10/2026.*
+
 ## 1. Context và mục tiêu
 
 Dự án môn Hệ điều hành: **Đề tài 26106 — POSIX-style signals (Processes, ★★)** trên xv6-riscv.
@@ -29,19 +31,19 @@ File này mô tả **quy tắc làm việc**, không chứng minh tính năng đ
 - Không tự thay đổi yêu cầu, phân công, syscall ABI hoặc semantics khi chưa có sự thống nhất.
 - Không thêm thư viện, framework hoặc subsystem ngoài phạm vi nếu xv6 hiện có đáp ứng.
 - Không chép lời giải công khai làm phần tự triển khai. Ghi nguồn tham khảo và tuân thủ quy định học phần.
-- Mỗi thành viên phải hiểu và giải thích được code mình nộp.
+- Mỗi thành viên phải hiểu và giải thích được code mình nộp. Commit đứng tên người thực hiện; không re-author code của thành viên khác.
 - Không tự push, merge, tạo PR, thay đổi GitHub settings hoặc gửi thông tin ra ngoài nếu người dùng chưa yêu cầu.
 
 ## 3. Bắt đầu mỗi task
 
 Trước khi sửa code:
 
-1. Đọc `AGENTS.md`, `README.md`, `Makefile`, tài liệu thiết kế/API và handoff có liên quan.
+1. Đọc `AGENTS.md`, `README.md`, `Makefile`, `docs/signal-design.md` (quyết định D1–D6) và tài liệu module liên quan trong `docs/`.
 2. Kiểm tra `git status`, branch, commit hiện tại và diff. Không xóa hoặc ghi đè thay đổi của thành viên khác; không tùy tiện `reset --hard`, `clean -fd` hay force-push.
-3. Xác minh **commit/tag xv6 baseline** mà nhóm và giảng viên chọn. Không tự nâng cấp sang HEAD mới của MIT.
-4. Đọc code **trên đúng baseline**: `kernel/proc.c`, `kernel/proc.h`, `kernel/trap.c`, `kernel/syscall.c`, `kernel/sysproc.c`, `kernel/trampoline.S`, `user/` và các file liên quan. Đường dẫn thực tế có thể khác theo phiên bản.
+3. **Baseline xv6:** MIT xv6-riscv tại commit `f780d78` (15/10/2026), nhập vào repo ở `0612d85` (PR #1). Không tự nâng cấp sang HEAD mới của MIT.
+4. Đọc code **trên đúng baseline**: `kernel/proc.c`, `kernel/proc.h`, `kernel/trap.c`, `kernel/syscall.c`, `kernel/sysproc.c`, `kernel/trampoline.S`, `kernel/console.c`, `user/` và các file liên quan.
 5. Xác định rõ mục tiêu, input/output, syscall ABI, thay đổi trạng thái process, invariant, dependency, test tối thiểu và tiêu chí hoàn thành.
-6. Kiểm tra lệnh build/test thực sự được Makefile hỗ trợ; không giả định test hoặc syscall mới đã tồn tại.
+6. Kiểm tra lệnh build/test thực sự được Makefile hỗ trợ (mục 10).
 
 Nếu không thể chạy QEMU hoặc thiếu toolchain, báo rõ giới hạn. **Build thành công không đồng nghĩa test runtime thành công.** Không tự cài đặt công cụ hệ thống nếu chưa được phép.
 
@@ -49,160 +51,159 @@ Nếu không thể chạy QEMU hoặc thiếu toolchain, báo rõ giới hạn. 
 
 | Thành viên | Module chính | Trách nhiệm liên quan |
 |---|---|---|
-| **Phạm Lê Quyền** | Signal sending & delivery | `kill()`, pending signals, lựa chọn signal, tích hợp delivery trong kernel |
-| **Trần Việt Hưng** | Signal handler & context | `sigaction()`, handler frame trên user stack, `sigreturn()`, khôi phục thanh ghi, nested handlers |
-| **Nguyễn Trung Kiên** | Signal masking & timer | `sigprocmask()`, `alarm()`, timer tick, test masked/pending signals |
+| **Phạm Lê Quyền** | Signal sending & delivery | `kkill()`, `sig_send()`, `sig_deliver()`, pending signals, lựa chọn signal, hành động mặc định, vòng đời process và wakeup (`sleep_prepare_intr`), lock order trong `signal-core-locking.md`; test `killtest` |
+| **Trần Việt Hưng** | Signal handler & context | `ksigaction()`, `sig_setup_frame()`, `ksigreturn()`, `struct sigframe`, khôi phục thanh ghi, nested handlers, `sa_mask`; test `regtest` |
+| **Nguyễn Trung Kiên** | Mask, timer, shell và tích hợp | `ksigprocmask()`, `kalarm()`, `sig_alarm_check()`, `pause`; Ctrl+C → SIGINT (`fg_pid`, `console_setfg`, syscall `setfg`, `sh.c`); test `sigtest`, `pausetest`, 3 chương trình demo; tự động hóa test và CI |
 
 - Mỗi thành viên chịu trách nhiệm **code, test và tài liệu** của module mình; không đẩy toàn bộ việc test sang Kiên.
 - Review chéo mặc định: **Hưng review Quyền; Kiên review Hưng; Quyền review Kiên**. Review do AI gợi ý không thay cho review thực tế của thành viên.
-- **Quyền ↔ Kiên:** thống nhất biểu diễn `pending`, `blocked`, điều kiện chọn signal và thời điểm delivery.
-- **Quyền ↔ Hưng:** thống nhất cách kernel chuyển từ delivery sang handler, sửa trapframe/PC/SP và cách quay lại user mode.
-- **Hưng ↔ Kiên:** thống nhất mask khi vào handler, khôi phục mask khi `sigreturn()` và hành vi nested handler.
-- Các file `kernel/proc.h`, `kernel/proc.c`, `kernel/trap.c`, `kernel/syscall.*` có thể được nhiều người sửa: **thống nhất API và phối hợp PR trước khi thay đổi**. Phân công module không có nghĩa sở hữu độc quyền file.
+- **Quyền ↔ Kiên:** thống nhất biểu diễn `pending_signals`, `blocked_signals`, điều kiện chọn signal (`pending & ~blocked & SUPPORTED_MASK`) và thời điểm delivery.
+- **Quyền ↔ Hưng:** thống nhất cách kernel chuyển từ `sig_deliver()` sang `sig_setup_frame()`, sửa trapframe/PC/SP và cách quay lại user mode.
+- **Hưng ↔ Kiên:** thống nhất mask khi vào handler (`blocked |= sa_mask | (1 << sig)`), khôi phục mask khi `sigreturn()` và hành vi nested handler.
+- Các file `kernel/proc.h`, `kernel/proc.c`, `kernel/trap.c`, `kernel/syscall.*`, `kernel/signal.h` có thể được nhiều người sửa: **thống nhất API và phối hợp PR trước khi thay đổi**. Phân công module không có nghĩa sở hữu độc quyền file.
+- File test: Quyền chỉ sửa `user/killtest.c`; Hưng chỉ sửa `user/regtest.c`; Kiên sửa `user/sigtest.c`, `user/pausetest.c`, các demo, `test-xv6.py` và `.github/workflows/test.yml`.
 - Không tự tạo nhiều AI agents hoặc thay đổi phân công nếu chưa có yêu cầu.
 
 ## 5. Quy tắc sửa code và Git
 
 - Ưu tiên patch nhỏ, mỗi PR có mục tiêu và test rõ ràng; không format/refactor toàn repository.
 - Giữ phong cách C và cách xử lý lỗi hiện có của xv6; không dùng API libc của host trong kernel.
+- **Định dạng code:** chạy `make fmt` (clang-format theo `.clang-format` của repo) trước mỗi commit. CI chạy `make fmt && git diff --exit-code`, code sai định dạng làm CI đỏ. Chạy clang-format từ thư mục gốc repo để nó đọc đúng `.clang-format`.
 - Kiểm tra user pointers, địa chỉ stack, kích thước frame, alignment, overflow và mọi nhánh lỗi.
 - Khi thay đổi ABI, syscall numbers, cấu trúc dùng chung hoặc trapframe, cập nhật tất cả caller, user wrappers, test và tài liệu liên quan.
 - Không để TODO thay thế một tính năng core rồi báo đã hoàn thành.
 - Không bỏ test, sửa expected result tùy tiện hoặc tắt kiểm tra để che lỗi.
-- Branch gợi ý: `feature/signal-delivery`, `feature/signal-handler`, `feature/signal-mask-alarm`; dùng branch nhỏ hơn cho từng Issue khi phù hợp.
-- Commit mô tả rõ thay đổi; tạo Pull Request để review trước khi merge vào `main`.
+- **Branch:** mỗi người một nhánh theo tuần, tên `feature/<module>-w<N>` (ví dụ `feature/signal-core-w5`, `feature/sa-mask-w5`, `feature/autotest-w5`); xuất phát từ `main` đầu tuần.
+- **Pull Request:** mọi thay đổi vào `main` đi qua PR có review chéo; không commit hay merge thẳng vào `main`. Thứ tự merge cuối tuần: **Quyền → Hưng → Kiên** (Kiên merge cuối để CI chạy trên toàn bộ test mới). Không push thêm commit lên nhánh sau khi PR đã merge; mở PR mới.
+- Trước khi mở PR: `make clean && make qemu` trên `CPUS=1` và `CPUS=4`, chạy test của module mình và `usertests`.
+- Commit mô tả rõ thay đổi theo dạng `loại(phạm vi): nội dung` (ví dụ `test(signal-core): DL-14 gửi signal tới tiến trình ZOMBIE`).
 - Không commit token, mật khẩu, secret, file build hoặc log chứa thông tin nhạy cảm.
 
 ## 6. Invariant kernel và signal lifecycle
 
+Các quyết định đã chốt nằm trong `docs/signal-design.md` (D1–D6) và là nguồn chân lý duy nhất. Tóm tắt những điểm mọi thay đổi phải giữ:
+
+- Bitmask 32-bit cho `pending_signals` và `blocked_signals`; signal hợp lệ là `SUPPORTED_MASK`; `SIGKILL` không bắt, không chặn, không bỏ qua được (`UNBLOCKABLE_MASK`).
+- Signal được giao duy nhất tại điểm trở về user mode (`sig_deliver()`); không chạy handler user trong kernel hay interrupt context.
+- Nhiều signal cùng pending được giao theo số hiệu tăng dần (quyết định của nhóm, không phải yêu cầu POSIX).
+- Thứ tự khóa toàn hệ thống: `tickslock → p->lock` và `cons.lock → p->lock`; không bao giờ lấy theo chiều ngược. `kkill()` chỉ dùng spinlock, không `sleep()`, nên gọi được từ ngắt.
+- Trường cần `p->lock`: `pending_signals`, `alarm_deadline`. Trường riêng của tiến trình: `blocked_signals`, `sig_actions`.
+- `fork`: con kế thừa mask và handler, không kế thừa pending và alarm. `exec`: handler về `SIG_DFL`, giữ `SIG_IGN`, hủy alarm.
+- User stack là 1 trang (`USERSTACK = 1`); khi không đủ chỗ đặt `sigframe`, tiến trình bị kết thúc với `-1`, kernel không panic.
+
 ### 6.1. Process state và locking
 
 - Xác định context của từng thao tác: syscall, user trap, kernel trap, timer interrupt, process exit hoặc wakeup. Không giả định luôn có process hiện tại.
-- Pending và blocked signals phải có biểu diễn rõ ràng, được đồng bộ đúng khi nhiều CPU cùng truy cập; không dùng `volatile` thay cho locking/atomic.
-- Định nghĩa rõ signal nào hợp lệ, signal nào có thể bị mask, hành vi signal lặp lại và cách xử lý process đã exit/zombie.
+- Không dùng `volatile` thay cho locking/atomic.
 - Không gọi code có thể sleep, yield hoặc block khi đang giữ spinlock hay trong interrupt context không cho phép.
-- Kiểm tra lock order, balanced acquire/release, race giữa `kill`, unmask, timer và delivery.
-- Không đưa handler user vào chạy trực tiếp trong kernel context.
+- Kiểm tra lock order, balanced acquire/release, race giữa `kill`, unmask, timer và delivery. Hai khe lost wakeup đã đóng (`p->chan = 0` trong `sig_send`, `sleep_prepare_intr`); thay đổi ở `sleep`/`wakeup`/`sig_send` phải chạy lại `killtest` T10 (500 vòng) trên `CPUS=4`.
 
 ### 6.2. Trapframe, user stack và context restoration
 
-- Chỉ chuyển điều khiển đến handler ở điểm trở về user mode phù hợp với trap path thực tế.
-- Handler frame phải được ghi vào **user stack hợp lệ**, kiểm tra địa chỉ, alignment, quyền truy cập và thất bại `copyout` (nếu dùng).
-- Trước khi vào handler, lưu đủ trạng thái cần thiết để `sigreturn()` khôi phục **chính xác các thanh ghi và PC/SP** theo ABI đã thống nhất.
-- Không tin dữ liệu hoặc địa chỉ do user cung cấp mà không xác minh; không để frame bị giả mạo dẫn đến kernel memory corruption.
-- Nested handlers cần chính sách rõ: thứ tự frame, giới hạn độ sâu nếu có, signal nào được phép lồng và cách xử lý stack không đủ chỗ.
-- Trạng thái mask trước khi chạy handler và sau `sigreturn()` phải nhất quán; không vô tình làm mất pending signals.
+- Handler frame phải được ghi vào **user stack hợp lệ**, kiểm tra địa chỉ, alignment 16 byte, quyền truy cập và thất bại `copyout`.
+- `sigreturn()` khôi phục 32 thanh ghi và mask từ `sigframe`; dispatcher syscall không ghi đè `a0` cho `SYS_sigreturn`.
+- Không tin dữ liệu hoặc địa chỉ do user cung cấp mà không xác minh; `sigreturn` với frame không hợp lệ kết thúc tiến trình, không làm hỏng kernel.
+- Nested handlers: thứ tự unwind LIFO, mask trở lại giá trị ban đầu sau mỗi tầng.
 - Phân biệt user trap và kernel trap; không sửa đường kernel trap khi chưa chứng minh cần thiết.
 
 ### 6.3. Lifetime và lỗi
 
-- Định nghĩa cách khởi tạo/copy/reset signal state khi `allocproc`, `fork`, `exec`, `exit` và `freeproc` theo phạm vi đã chốt.
-- Không giữ pointer tới user stack hoặc process sau khi lifetime kết thúc.
-- Có cách xử lý an toàn khi handler không hợp lệ, stack lỗi, syscall sai tham số, signal không hợp lệ hoặc alarm hết hạn gần lúc process thoát.
-- Nếu semantics chưa được đề bài quy định (ví dụ default action, ignored signals, restart syscall), ghi thành câu hỏi thiết kế; không âm thầm coi hành vi Linux/POSIX đầy đủ là yêu cầu.
+- Khởi tạo/copy/reset signal state khi `allocproc`, `fork`, `exec`, `exit` và `freeproc` theo D6.
+- `kill` tới tiến trình `UNUSED`/`ZOMBIE` trả `-1`; `wait()` vẫn nhận đúng exit status.
+- Nếu semantics chưa được đề bài quy định (ví dụ restart syscall, EINTR), ghi thành câu hỏi thiết kế; không âm thầm coi hành vi Linux/POSIX đầy đủ là yêu cầu.
 
 ## 7. Yêu cầu riêng của `kill()`, pending và delivery — Quyền
 
-- Xác minh `kill()` sẵn có trên baseline xv6: có thể đã mang nghĩa **đánh dấu process bị killed**, không phải POSIX signal API. Không ghi đè semantics cũ khi chưa có phương án tương thích.
-- Chốt chữ ký syscall, ý nghĩa tham số, signal numbers và error behavior với cả nhóm.
+- Chữ ký `int kill(int pid, int sig)` thay `kill(pid)` gốc; `SIGKILL` giữ đường `p->killed = 1` + đánh thức của xv6.
 - Pending set được cập nhật an toàn, không làm mất signal do race giữa sender, delivery và unmask.
 - Chọn signal từ `pending & ~blocked` theo chính sách đã công bố; xử lý nhiều pending signals một cách xác định.
-- Delivery phải phối hợp với action/handler do Hưng quản lý và mask do Kiên quản lý.
-- Không delivery vào user stack khi process không ở trạng thái phù hợp; không thực thi handler từ kernel.
-- Test tối thiểu: gửi signal hợp lệ/không hợp lệ, PID không tồn tại, nhiều pending signals, masked signal, delivery sau unmask và tương tác với process exit.
+- Delivery phối hợp với action/handler do Hưng quản lý và mask do Kiên quản lý.
+- Syscall đang chờ (`read`, `pause`, `wait`) bị signal thường ngắt trả `-1` (DL-10); semantics EINTR đầy đủ là stretch.
+- Test tối thiểu: signal hợp lệ/không hợp lệ/không hỗ trợ, PID không tồn tại, nhiều pending, masked signal, delivery sau unmask, ZOMBIE, SIGKILL khi chặn hết, tự gửi, hành vi mặc định của từng signal.
 
 ## 8. Yêu cầu riêng của `sigaction()`, handler frame, `sigreturn()` — Hưng
 
-- Chốt cấu trúc action, cách biểu diễn handler/default/ignore (nếu thuộc phạm vi), các flags được hỗ trợ và giá trị lỗi.
-- Xác minh ABI RISC-V, trapframe layout, cách truyền tham số cho handler, stack alignment và địa chỉ trở về/trampoline.
-- Tạo handler frame chứa đủ context cần thiết; xác định ownership, validation và layout trước khi code.
-- `sigreturn()` phải khôi phục đúng PC, SP, general-purpose registers và signal mask theo contract; tránh vô tình ghi đè giá trị thanh ghi bằng return value syscall thông thường.
-- Nested handlers phải có chiến lược stack frame và thứ tự unwind rõ; không làm hỏng context của handler bên ngoài.
-- Test tối thiểu: handler chạy đúng một lần, quay lại đúng vị trí, kiểm tra registers, nested handler, stack boundary và `sigreturn` không hợp lệ.
+- `struct sigaction` gồm `sa_handler`, `sa_mask`, `sa_flags` (bắt buộc 0), `sa_restorer`; `struct sigframe` gồm `saved_tf`, `saved_mask`.
+- Trước khi vào handler: `a0 = signum`, `ra = sa_restorer`, `epc = sa_handler`, `sp = (sp − sizeof(sigframe)) & ~0xF`.
+- `sigreturn()` khôi phục đúng PC, SP, thanh ghi và mask; tránh ghi đè `a0` bằng return value syscall.
+- Nested handlers có chiến lược stack frame và thứ tự unwind rõ; không làm hỏng context của handler bên ngoài.
+- Test tối thiểu: handler chạy đúng một lần, quay lại đúng vị trí, bảo toàn thanh ghi caller-saved và callee-saved, nested nhiều tầng, `sa_mask`, tràn user stack, `sigreturn` không hợp lệ, handler kích hoạt từ alarm lặp.
 
-## 9. Yêu cầu riêng của `sigprocmask()`, `alarm()` — Kiên
+## 9. Yêu cầu riêng của `sigprocmask()`, `alarm()`, Ctrl+C — Kiên
 
-- Chốt API block/unblock/setmask và giá trị mask hợp lệ; định nghĩa rõ các signal không được block nếu thiết kế có quy định.
-- Signal bị block **vẫn pending** theo semantics đã thống nhất; unmask kích hoạt delivery tại điểm an toàn, không gọi handler ngay trong syscall/interrupt context một cách tùy tiện.
-- `alarm()` phải có đơn vị thời gian/tick, chính sách thay thế alarm cũ, xử lý zero, overflow và lifecycle process rõ ràng.
-- Timer interrupt chỉ cập nhật trạng thái tối thiểu cần thiết; không chạy handler user trực tiếp trong timer interrupt.
-- Với demo periodic handler, nếu API `alarm()` chỉ hỗ trợ one-shot, chương trình demo cần tự re-arm theo thiết kế; không tự coi alarm là periodic mặc định.
-- Test tối thiểu: block/unblock, pending khi masked, nhiều signals, alarm one-shot/re-arm, alarm bị thay thế/hủy, race với exit và kết hợp alarm + mask.
+- `sigprocmask(how, set, oldset)` với `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK`; `SIGKILL` bị lọc khỏi mask.
+- Signal bị block **vẫn pending**; unmask kích hoạt delivery tại điểm trở về user mode.
+- `alarm(n)` tính deadline tuyệt đối `ticks + n`, so sánh có dấu trong `clockintr` trên CPU 0; `alarm(0)` hủy; alarm mới thay alarm cũ; không kế thừa qua `fork`, hủy khi `exec`.
+- Timer interrupt chỉ đặt bit pending; không chạy handler user trong timer interrupt. Demo periodic tự re-arm trong handler.
+- **Ctrl+C:** `consoleintr()` nhận `0x03`, in `^C`, gọi `kkill(fg_pid, SIGINT)` dưới `cons.lock`; `sh.c` gọi `setfg(pid)` sau `fork` và `setfg(0)` sau `wait`. Giới hạn đã ghi: chỉ ngắt con trực tiếp của shell; khe giữa `fork` và `setfg`; chưa in lại `$` sau Ctrl+C tại dấu nhắc.
+- Test tối thiểu: block/unblock, pending khi masked, nhiều signals, alarm one-shot/re-arm/thay/hủy, race với exit, alarm + mask, 3 tình huống Ctrl+C (tại dấu nhắc, có handler, `SIG_DFL`).
 
 ## 10. Build và kiểm thử
 
-### 10.1. Quy trình cho mỗi patch
+### 10.1. Lệnh và chương trình test hiện có
 
-1. Ghi baseline commit, branch và cấu hình môi trường (compiler, QEMU, CPUS nếu liên quan).
-2. Build bằng lệnh repo hỗ trợ (thường là `make qemu` hoặc lệnh tương ứng, nhưng phải kiểm tra Makefile).
-3. Chạy test trực tiếp cho chức năng thay đổi, bao gồm error paths và boundary cases.
-4. Với trapframe, locking hoặc timer, kiểm tra thêm các cấu hình CPU phù hợp, ưu tiên `CPUS=1` và `CPUS=4` khi môi trường hỗ trợ.
-5. Chạy regression liên quan để phát hiện xv6 baseline bị hỏng; trước final cần có full `usertests` và stress phù hợp.
+| Lệnh / chương trình | Mục đích |
+|---|---|
+| `make clean && make qemu CPUS=1` / `CPUS=4` | Build và boot; mọi test chạy ở cả hai cấu hình |
+| `make fmt` | clang-format toàn bộ `kernel/`, `user/`, `mkfs/` |
+| `killtest` | Signal core, mã DL-xx (Quyền) |
+| `regtest` | Handler, mã HD-xx và REG-xx (Hưng) |
+| `sigtest`, `pausetest` | Mask, alarm, pause, mã MK/AL/PA-xx (Kiên) |
+| `ctrlc_demo [dfl]`, `alarm_demo`, `mask_demo` | 3 demo bắt buộc; kịch bản trong `docs/test-plan.md` §3 |
+| `usertests -q`, `forktest` | Hồi quy xv6 gốc (RG-01) |
+| `./test-xv6.py usertests`, `./test-xv6.py crash` | Bước CI; cần Python 3 và QEMU trên host |
+
+Thoát QEMU: `Ctrl+A` rồi `X`. Ctrl+C trong QEMU được gửi vào xv6 (demo), không thoát QEMU.
+
+### 10.2. Quy trình cho mỗi patch
+
+1. Ghi baseline commit, branch và cấu hình môi trường (compiler, QEMU, CPUS).
+2. `make fmt`, rồi `make clean && make qemu`.
+3. Chạy test của chức năng thay đổi, gồm error paths và boundary cases.
+4. Với trapframe, locking hoặc timer, chạy trên cả `CPUS=1` và `CPUS=4`.
+5. Chạy `usertests -q` để phát hiện xv6 baseline bị hỏng; trước final cần full `usertests` và stress.
 6. Lưu lệnh chạy, log thật, commit hash, kết quả PASS/FAIL và giới hạn kiểm thử.
 
-**Không ghi PASS nếu chỉ compile; không ghi chức năng hoàn thành khi mới có pseudocode hoặc prototype.** Không giả định test runner, `make test` hoặc các user programs đã tồn tại.
-
-### 10.2. Ma trận test mục tiêu
-
-| Nhóm test | Tình huống cần bao phủ |
-|---|---|
-| Delivery | valid/invalid signal, PID không tồn tại, nhiều pending, gửi khi process đang chạy/ngủ |
-| Handler | đăng ký handler, thay handler, handler return, bảo toàn registers/PC/SP |
-| Nested | handler lồng nhau, thứ tự unwind, giới hạn user stack |
-| Masking | block, unblock, pending trong lúc block, delivery sau unblock |
-| Alarm | hết hạn, thay/hủy alarm, re-arm để demo periodic, alarm bị mask |
-| Integration | `kill` + `sigaction` + `sigprocmask` + `alarm` + `sigreturn` |
-| Regression | shell, process lifecycle, syscall cũ, `usertests` và stress thích hợp |
-
-Mỗi test cần mô tả **setup → action → expected → actual → PASS/FAIL**. Không đặt số lượng test hoặc ngưỡng benchmark như yêu cầu của giảng viên nếu chưa được xác nhận.
+**Không ghi PASS nếu chỉ compile; không ghi chức năng hoàn thành khi mới có pseudocode hoặc prototype.** Một ca test chỉ PASS khi đã chạy thật trên QEMU, log khớp kỳ vọng, không panic, và ghi theo dạng **Mã test → Setup → Action → Expected → Actual → PASS/FAIL** (`docs/test-plan.md` §1.2).
 
 ### 10.3. CI và minh chứng
 
-- Khi có runner ổn định, có thể bổ sung GitHub Actions để build và chạy test tự động; không tự nhận CI đã có.
-- Giữ log khi test thất bại, phân biệt QEMU timeout, test timeout và kernel panic.
-- Không dùng `retry until pass` rồi giấu lần thất bại.
+- CI hiện có (`.github/workflows/test.yml`, job linux): kiểm tra định dạng, build kernel và `fs.img`, `./test-xv6.py usertests`, `./test-xv6.py crash`. Job macOS chỉ build.
+- Test signal (`killtest`, `regtest`, `sigtest`, `pausetest`, demo, Ctrl+C) **chưa** chạy trong CI; đưa vào CI là việc tuần 5 (AU-01..03). Không ghi "CI xanh" như bằng chứng cho test signal khi chưa có bước đó.
+- CI lỗi do `apt-get` hoặc DNS (`Temporary failure resolving`) không phải lỗi code: cancel và re-run, không sửa code để "fix".
+- Giữ log khi test thất bại, phân biệt QEMU timeout, test timeout và kernel panic. Không dùng `retry until pass` rồi giấu lần thất bại.
+- Log hồi quy cuối tuần lưu trong `docs/logs/` (từ tuần 5).
 - Không để GitHub Actions hoặc script tự dùng token/secret ngoài phạm vi được cấp.
 
 ## 11. Demo và đánh giá
 
-Demo mục tiêu:
+Ba demo bắt buộc, kịch bản và expected output trong `docs/test-plan.md` §3:
 
-1. Chương trình user lặp; Ctrl+C dẫn đến signal và handler tương ứng theo đường input/console đã triển khai.
-2. `alarm()` kích hoạt handler; nếu cần lặp định kỳ, handler hoặc chương trình user re-arm alarm theo semantics đã chốt.
-3. Signal bị mask được giữ pending và được delivery sau khi unmask.
+1. `ctrlc_demo`: chương trình lặp, Ctrl+C gọi handler SIGINT rồi thoát sạch; `ctrlc_demo dfl` bị kết thúc; Ctrl+C tại dấu nhắc không giết shell.
+2. `alarm_demo`: handler SIGALRM tự re-arm `alarm()` để chạy định kỳ.
+3. `mask_demo`: signal bị mask giữ pending và được delivery ngay sau khi unmask.
 
-- Kiểm tra rõ xv6 baseline có hay chưa cơ chế biến Ctrl+C thành signal; nếu chưa, đây là phần tích hợp cần triển khai, không phải tính năng có sẵn.
 - Mỗi demo có hướng dẫn build/run, expected output, actual log và commit tương ứng.
 - Nếu đo latency/overhead, lưu môi trường và dữ liệu thô; không kết luận từ một lần chạy.
 - Stretch SIGSEGV/fault address và interrupted syscall chỉ trình diễn khi thực sự triển khai và kiểm chứng.
 
-## 12. Lịch và ưu tiên (kế hoạch nội bộ 8 tuần)
+## 12. Lịch và ưu tiên
 
-| Tuần | Quyền — Delivery | Hưng — Handler | Kiên — Mask/Alarm |
-|---|---|---|---|
-| 1 | Khảo sát `kill`, process, pending/delivery; thiết kế | Khảo sát `sigaction`, trapframe, user stack, `sigreturn`; thiết kế | Khảo sát `sigprocmask`, timer/alarm; lập test matrix |
-| 2 | Chốt pending state và signal selection | Chốt action structure, handler context | Chốt mask và alarm state/tick |
-| 3 | Triển khai `kill`, pending, kernel hooks | Triển khai `sigaction`, handler frame, `sigreturn` ban đầu | Triển khai `sigprocmask` |
-| 4 | Hoàn thiện delivery có xét mask | Hoàn thiện context restoration | Triển khai `alarm`, timer tick |
-| 5 | Nhiều pending và edge cases | Nested handlers và context stack | Test mask/pending/alarm |
-| 6 | Tích hợp và sửa lỗi | Kiểm thử registers/context/nested | Integration/regression tests |
-| 7 | Hỗ trợ demo Ctrl+C, stretch nếu còn thời gian | Sửa lỗi trap/context, hỗ trợ stretch | Hoàn thiện demo và regression |
-| 8 | Đóng băng module, tài liệu | Đóng băng module, tài liệu | Test cuối, báo cáo và demo |
+Khung thời gian và phân công theo **kế hoạch 8 tuần** của nhóm (`Project_26106_Ke_hoach_8_tuan`). Nội dung thật của mỗi tuần được quyết định bởi mục TODO của báo cáo tuần trước, sai lệch không quá 25%. Tiến độ thực tế từng tuần ghi trong báo cáo tuần (`docs/weekly/`).
 
-Đây là **kế hoạch đề xuất**, không phải bằng chứng tiến độ hay deadline giảng viên đã phê duyệt. Khi trễ tiến độ, ưu tiên core correctness, integration và test trước stretch.
+Khi trễ tiến độ, ưu tiên core correctness, integration và test trước stretch. Tuần 8 không thêm tính năng lớn vào `main`.
 
 ## 13. Tài liệu, báo cáo tuần và bàn giao
 
-Tận dụng cấu trúc repo hiện có. Khi cần, có thể dùng:
-
-- `docs/signal-delivery.md`: thiết kế của Quyền.
+- `docs/signal-design.md`: API/ABI chung, cấu trúc dữ liệu, lifecycle, quyết định D1–D6. **Nguồn chân lý duy nhất.**
+- `docs/signal-delivery.md`, `docs/signal-core-locking.md`: thiết kế và phân tích khóa của Quyền.
 - `docs/signal-handler.md`: thiết kế của Hưng.
-- `docs/signal-mask-alarm.md`: thiết kế của Kiên.
-- `docs/signal-design.md`: API/ABI chung, state layout, lifecycle, quyết định thiết kế.
-- `docs/test-plan.md`: test matrix và cách chạy.
-- `docs/weekly/week-01.md` và các tuần tiếp theo: báo cáo tiến độ có bằng chứng.
+- `docs/signal-mask-alarm.md`: thiết kế của Kiên, gồm Ctrl+C (§9).
+- `docs/test-plan.md`: ma trận kiểm thử theo mã, kịch bản 3 demo, trạng thái PASS/FAIL.
+- `docs/weekly/week-NN.md`: báo cáo tuần có bằng chứng (đang khôi phục; `week-03.md` bị xóa ở `ebcee8b`).
+- `docs/logs/`: log hồi quy cuối tuần, `CPUS=1` và `CPUS=4`.
 
-Không tạo tài liệu rỗng chỉ để đủ danh sách. Báo cáo tuần nên phân biệt: **đã nghiên cứu / đã thiết kế / đã code / đã build / đã test / đã merge**.
+Không tạo tài liệu rỗng chỉ để đủ danh sách. Báo cáo tuần phân biệt: **đã nghiên cứu / đã thiết kế / đã code / đã build / đã test / đã merge**. Mục TODO của báo cáo tuần N là kế hoạch tuần N+1.
 
 Kết thúc mỗi task, báo cáo:
 
@@ -229,4 +230,4 @@ Bước tiếp theo và tiêu chí hoàn thành:
 
 Một task chỉ hoàn thành khi đáp ứng phạm vi được giao, thay đổi có thể review, có kiểm thử phù hợp rủi ro, không phá hành vi xv6 cũ, tài liệu nhất quán và người thực hiện hiểu code.
 
-Đồ án chỉ được coi là hoàn thành khi các giao diện signal cốt lõi hoạt động phối hợp, handler frame và register restoration đúng, masked/pending/nested/alarm tests có bằng chứng, demo chạy được và báo cáo phản ánh chính xác code đã merge. File này không thay thế yêu cầu hoặc quyết định chấm điểm của giảng viên.
+Đồ án chỉ được coi là hoàn thành khi các giao diện signal cốt lõi hoạt động phối hợp, handler frame và register restoration đúng, masked/pending/nested/alarm tests có bằng chứng, 3 demo chạy được và báo cáo phản ánh chính xác code đã merge. File này không thay thế yêu cầu hoặc quyết định chấm điểm của giảng viên.
