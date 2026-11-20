@@ -647,6 +647,11 @@ kkill(int pid, int sig)
   if (pid <= 0 || sig <= 0 || sig >= NSIG)
     return -1;
 
+  // DL-17: từ chối signal không được hỗ trợ, không bật bit pending,
+  // không đánh thức nhầm tiến trình đang ngủ.
+  if (!(SUPPORTED_MASK & (1U << sig)))
+    return -1;
+
   for (p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
     if (p->pid == pid && p->state != UNUSED && p->state != ZOMBIE) {
