@@ -598,6 +598,79 @@ test_self_send_handler(void)
   check(seen == 1, "handler da chay xong ngay khi kill() tra ve");
   set_handler(SIGUSR1, SIG_DFL);
 }
+static void
+test_unsupported_signal(void)
+{
+  printf("Test 16 (DL-17): signal khong duoc ho tro\n");
+  check(kill(getpid(), 5) == -1, "kill(self, 5) == -1");
+  check(kill(getpid(), 31) == -1, "kill(self, 31) == -1");
+
+  // Signal co ho tro nhung dang SIG_IGN van phai tra 0.
+  check(set_handler(SIGUSR2, SIG_IGN) == 0, "sigaction(SIGUSR2, SIG_IGN) == 0");
+  check(kill(getpid(), SIGUSR2) == 0, "kill(self, SIGUSR2 bi IGN) == 0");
+  set_handler(SIGUSR2, SIG_DFL);
+
+  // Con dang ngu trong read(): signal khong ho tro khong duoc danh thuc no.
+  int fd[2];
+  pipe(fd);
+  int pid = fork();
+  if (pid == 0) {
+    close(fd[1]);
+    char c;
+    int n = read(fd[0], &c, 1); // chi tra ve khi cha ghi
+    exit(n == 1 ? 3 : 4);
+  }
+  close(fd[0]);
+  pause(5);
+  check(kill(pid, 5) == -1, "kill(con dang ngu, 5) == -1");
+  pause(5);
+  write(fd[1], "x", 1);
+  close(fd[1]);
+  int status = 0;
+  wait(&status);
+  check(status == 3,
+        "con khong bi danh thuc nham, read() nhan du lieu binh thuong");
+}
+
+static void
+test_default_actions(void)
+{
+  printf("Test 17 (DL-18): hanh vi mac dinh (SIG_DFL) cua 7 signal\n");
+  int sigs[7] = {SIGHUP, SIGINT, SIGQUIT, SIGUSR1, SIGUSR2, SIGALRM, SIGTERM};
+  char *names[7] = {
+    "SIGHUP mac dinh: con ket thuc voi -1",
+    "SIGINT mac dinh: con ket thuc voi -1",
+    "SIGQUIT mac dinh: con ket thuc voi -1",
+    "SIGUSR1 mac dinh: con ket thuc voi -1",
+    "SIGUSR2 mac dinh: con ket thuc voi -1",
+    "SIGALRM mac dinh: con ket thuc voi -1",
+    "SIGTERM mac dinh: con ket thuc voi -1",
+  };
+
+  for (int i = 0; i < 7; i++) {
+    int fd[2];
+    pipe(fd);
+    int pid = fork();
+    if (pid == 0) {
+      // Dua ve trang thai sach: SIG_DFL, khong chan signal nao.
+      set_handler(sigs[i], SIG_DFL);
+      unsigned int zero = 0;
+      sigprocmask(SIG_SETMASK, &zero, 0);
+      close(fd[1]);
+      char c;
+      read(fd[0], &c, 1); // ngu cho toi khi bi signal
+      exit(0);            // chi toi day neu signal KHONG giet con
+    }
+    close(fd[0]);
+    pause(2);
+    int r = kill(pid, sigs[i]);
+    close(
+      fd[1]); // neu con chua chet, read() tra 0 va con exit(0) -> test FAIL, khong treo
+    int status = 0;
+    wait(&status);
+    check(r == 0 && status == -1, names[i]);
+  }
+}
 
 int
 main(int argc, char *argv[])
@@ -626,6 +699,8 @@ main(int argc, char *argv[])
   test_zombie();
   test_sigkill_blocked_all();
   test_self_send_handler();
+  test_unsupported_signal();
+  test_default_actions();
 
   printf("=== Ket qua: %d PASS, %d FAIL ===\n", passed, failed);
   if (failed == 0)

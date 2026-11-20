@@ -145,7 +145,7 @@ sig_deliver(void)
     return;
 
   // If already marked killed, exit immediately
-  if (p->killed)
+  if (killed(p))
     kexit(-1);
 
   for (;;) {
