@@ -235,7 +235,6 @@ reg36_alrm_handler(int sig)
     reg36_error = 1;
 }
 
-
 // Bien va handler phuc vu REG-37 (HD-14: sa_mask defer signal)
 static volatile int reg37_order[4];
 static volatile int reg37_count = 0;
@@ -1874,10 +1873,11 @@ main(int argc, char *argv[])
     sigprocmask(SIG_SETMASK, &oldmask, 0);
 
     if (pass) {
-      printf("REG-37 PASS: sa_mask deferred SIGUSR2 until SIGUSR1 handler returned (HD-14)\n");
+      printf(
+        "REG-37 PASS: sa_mask deferred SIGUSR2 until SIGUSR1 handler returned (HD-14)\n");
     } else {
-      printf("REG-37 FAIL: count=%d, error=%d, order=",
-             reg37_count, reg37_error);
+      printf("REG-37 FAIL: count=%d, error=%d, order=", reg37_count,
+             reg37_error);
 
       for (int i = 0; i < reg37_count && i < 4; i++)
         printf("%d ", reg37_order[i]);
@@ -1887,7 +1887,7 @@ main(int argc, char *argv[])
     }
   }
 
-    // REG-38: HD-15 - Kiem tra mask trong handler va khoi phuc mask ban dau
+  // REG-38: HD-15 - Kiem tra mask trong handler va khoi phuc mask ban dau
   {
     struct sigaction act, oldact;
     sigset_t set, oldmask;
@@ -1898,9 +1898,7 @@ main(int argc, char *argv[])
     int pass = 1;
 
     // Chan cac signal duoc su dung va luu mask ban dau.
-    set = (1U << SIGUSR1) |
-          (1U << SIGUSR2) |
-          (1U << SIGALRM);
+    set = (1U << SIGUSR1) | (1U << SIGUSR2) | (1U << SIGALRM);
 
     if (sigprocmask(SIG_BLOCK, &set, &oldmask) < 0) {
       printf("REG-38 FAIL: cannot block signals\n");
@@ -1938,8 +1936,7 @@ main(int argc, char *argv[])
     }
 
     // Trong handler phai block SIGALRM, SIGUSR1 va SIGUSR2.
-    expected_handler_mask =
-        initial_mask | (1U << SIGUSR1) | (1U << SIGUSR2);
+    expected_handler_mask = initial_mask | (1U << SIGUSR1) | (1U << SIGUSR2);
 
     if (reg38_handler_called != 1 || reg38_error)
       pass = 0;
@@ -1969,19 +1966,19 @@ main(int argc, char *argv[])
     }
 
     if (pass) {
-      printf("REG-38 PASS: handler mask correct and original mask restored (HD-15)\n");
+      printf(
+        "REG-38 PASS: handler mask correct and original mask restored (HD-15)\n");
     } else {
-      printf("REG-38 FAIL: called=%d, error=%d\n",
-             reg38_handler_called, reg38_error);
-      printf("Handler mask: %x, expected: %x\n",
-             reg38_handler_mask, expected_handler_mask);
-      printf("Current mask: %x, expected: %x\n",
-             current_mask, initial_mask);
+      printf("REG-38 FAIL: called=%d, error=%d\n", reg38_handler_called,
+             reg38_error);
+      printf("Handler mask: %x, expected: %x\n", reg38_handler_mask,
+             expected_handler_mask);
+      printf("Current mask: %x, expected: %x\n", current_mask, initial_mask);
       exit(1);
     }
   }
 
-    // REG-39: HD-16 - Re-arm SIGALRM 5 lan,
+  // REG-39: HD-16 - Re-arm SIGALRM 5 lan,
   // kiem tra tinh toan va bao toan thanh ghi s1-s11
   {
     struct sigaction act, oldact;
@@ -2035,58 +2032,55 @@ main(int argc, char *argv[])
     // s1-s11: cac gia tri can kiem tra bao toan.
     // t2: so lan lap.
     // t3: tong 1 + 2 + ... + t2.
-    asm volatile(
-        "li s1, 0x101\n"
-        "li s2, 0x102\n"
-        "li s3, 0x103\n"
-        "li s4, 0x104\n"
-        "li s5, 0x105\n"
-        "li s6, 0x106\n"
-        "li s7, 0x107\n"
-        "li s8, 0x108\n"
-        "li s9, 0x109\n"
-        "li s10, 0x10a\n"
-        "li s11, 0x10b\n"
+    asm volatile("li s1, 0x101\n"
+                 "li s2, 0x102\n"
+                 "li s3, 0x103\n"
+                 "li s4, 0x104\n"
+                 "li s5, 0x105\n"
+                 "li s6, 0x106\n"
+                 "li s7, 0x107\n"
+                 "li s8, 0x108\n"
+                 "li s9, 0x109\n"
+                 "li s10, 0x10a\n"
+                 "li s11, 0x10b\n"
 
-        "li t2, 0\n"
-        "li t3, 0\n"
+                 "li t2, 0\n"
+                 "li t3, 0\n"
 
-        "1:\n"
-        "addi t2, t2, 1\n"
-        "add t3, t3, t2\n"
+                 "1:\n"
+                 "addi t2, t2, 1\n"
+                 "add t3, t3, t2\n"
 
-        // Goi getpid (syscall number 11).
-        "li a7, 11\n"
-        "ecall\n"
+                 // Goi getpid (syscall number 11).
+                 "li a7, 11\n"
+                 "ecall\n"
 
-        // Kiem tra so lan SIGALRM da duoc xu ly.
-        "lw t0, 0(%0)\n"
-        "li t1, 5\n"
-        "blt t0, t1, 1b\n"
+                 // Kiem tra so lan SIGALRM da duoc xu ly.
+                 "lw t0, 0(%0)\n"
+                 "li t1, 5\n"
+                 "blt t0, t1, 1b\n"
 
-        // Luu cac thanh ghi sau khi 5 handler ket thuc.
-        "sd s1, 0(%1)\n"
-        "sd s2, 8(%1)\n"
-        "sd s3, 16(%1)\n"
-        "sd s4, 24(%1)\n"
-        "sd s5, 32(%1)\n"
-        "sd s6, 40(%1)\n"
-        "sd s7, 48(%1)\n"
-        "sd s8, 56(%1)\n"
-        "sd s9, 64(%1)\n"
-        "sd s10, 72(%1)\n"
-        "sd s11, 80(%1)\n"
+                 // Luu cac thanh ghi sau khi 5 handler ket thuc.
+                 "sd s1, 0(%1)\n"
+                 "sd s2, 8(%1)\n"
+                 "sd s3, 16(%1)\n"
+                 "sd s4, 24(%1)\n"
+                 "sd s5, 32(%1)\n"
+                 "sd s6, 40(%1)\n"
+                 "sd s7, 48(%1)\n"
+                 "sd s8, 56(%1)\n"
+                 "sd s9, 64(%1)\n"
+                 "sd s10, 72(%1)\n"
+                 "sd s11, 80(%1)\n"
 
-        // Luu so lan lap va ket qua tinh tong.
-        "sd t2, 88(%1)\n"
-        "sd t3, 96(%1)\n"
+                 // Luu so lan lap va ket qua tinh tong.
+                 "sd t2, 88(%1)\n"
+                 "sd t3, 96(%1)\n"
 
-        :
-        : "r"(&reg39_fired), "r"(out_regs)
-        : "a0", "a7", "t0", "t1", "t2", "t3",
-          "s1", "s2", "s3", "s4", "s5", "s6",
-          "s7", "s8", "s9", "s10", "s11",
-          "memory");
+                 :
+                 : "r"(&reg39_fired), "r"(out_regs)
+                 : "a0", "a7", "t0", "t1", "t2", "t3", "s1", "s2", "s3", "s4",
+                   "s5", "s6", "s7", "s8", "s9", "s10", "s11", "memory");
 
     // Kiem tra handler duoc goi dung 5 lan.
     if (reg39_fired != REG39_ROUNDS || reg39_error)
@@ -2111,18 +2105,18 @@ main(int argc, char *argv[])
     sigprocmask(SIG_SETMASK, &oldmask, 0);
 
     if (pass) {
-      printf("REG-39 PASS: SIGALRM re-armed 5 times, computation and s1-s11 preserved (HD-16)\n");
+      printf(
+        "REG-39 PASS: SIGALRM re-armed 5 times, computation and s1-s11 preserved (HD-16)\n");
     } else {
-      printf("REG-39 FAIL: fired=%d, error=%d\n",
-             reg39_fired, reg39_error);
+      printf("REG-39 FAIL: fired=%d, error=%d\n", reg39_fired, reg39_error);
 
       for (int i = 0; i < 11; i++) {
-        printf("s%d expected=0x%x actual=0x%lx\n",
-               i + 1, 0x101 + i, out_regs[i]);
+        printf("s%d expected=0x%x actual=0x%lx\n", i + 1, 0x101 + i,
+               out_regs[i]);
       }
 
-      printf("iterations=%ld, sum=%ld, expected_sum=%ld\n",
-             out_regs[11], out_regs[12], expected_sum);
+      printf("iterations=%ld, sum=%ld, expected_sum=%ld\n", out_regs[11],
+             out_regs[12], expected_sum);
 
       exit(1);
     }
