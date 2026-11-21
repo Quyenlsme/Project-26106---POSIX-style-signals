@@ -66,6 +66,7 @@ kkill(pid, sig):
     1. Kiểm tra tham số:
        - pid <= 0: từ chối (xv6 baseline không hỗ trợ process group).
        - sig <= 0 || sig >= NSIG: từ chối số hiệu tín hiệu không hợp lệ.
+       - !(SUPPORTED_MASK & (1U << sig)): từ chối signal không được hỗ trợ (Tuần 5, DL-17).
        -> Nếu sai, trả về -1.
 
     2. Duyệt bảng tiến trình proc[]:
@@ -86,8 +87,10 @@ kkill(pid, sig):
 
     3. Nếu duyệt hết bảng không tìm thấy PID hợp lệ: trả về -1.
 ```
+**Vì sao phải từ chối signal không được hỗ trợ (Tuần 5):** trước Tuần 5, `kkill()` chỉ kiểm tra `1 ≤ sig < NSIG`, nên `kill(pid, 5)` hay `kill(pid, 31)` trả `0` dù `sigaction()` từ chối các signal này. Bit pending được bật nhưng `sig_deliver()` lọc bằng `SUPPORTED_MASK` nên không bao giờ được giao, và `sig_send()` còn đánh thức nhầm tiến trình đang ngủ. Kiểm tra `SUPPORTED_MASK` ngay đầu `kkill()` đóng cả hai vấn đề và làm `kill()` nhất quán với `sigaction()`.
 
 **Điểm kỹ thuật mấu chốt:** Việc đánh thức tiến trình đang `SLEEPING` sang `RUNNABLE` là bắt buộc. Nếu không có bước này, một tiến trình đang gọi `pause()` hoặc chờ I/O sẽ tiếp tục ngủ mãi mãi và không bao giờ thức dậy để nhận tín hiệu.
+
 
 ---
 
@@ -105,7 +108,7 @@ Tại đây, kernel gọi `sig_deliver()` trước lệnh tắt ngắt `intr_off
 ```text
 sig_deliver():
     p = myproc()
-    Nếu không có tiến trình hoặc p->killed == 1:
+    Nếu không có tiến trình hoặc killed(p) == 1:
         kexit(-1) // Ưu tiên kết thúc ngay nếu đã bị đánh dấu killed
 
     1. LỰA CHỌN TÍN HIỆU (Signal Selection):
@@ -297,7 +300,7 @@ sequenceDiagram
 
 ---
 
-## 8. Ma trận Kiểm thử Module Delivery (DL-01 đến DL-16)
+## 8. Ma trận Kiểm thử Module Delivery (DL-01 đến DL-18)
 
 Toàn bộ ca kiểm thử nằm trong `user/killtest.c` (chạy: `$ killtest` trong shell xv6).
 
@@ -313,12 +316,14 @@ Toàn bộ ca kiểm thử nằm trong `user/killtest.c` (chạy: `$ killtest` t
 | **DL-08** | Hành vi mặc định `SIG_DFL` | Không đặt handler, gửi `SIGUSR1` / `SIGTERM` | Tiến trình kết thúc ngay lập tức với exit code -1 | T5, T6 |
 | **DL-09** | Hành vi bỏ qua `SIG_IGN` | Đặt `SIG_IGN` cho `SIGUSR1`, gửi khi đang chờ `read()` | Tín hiệu bị tiêu thụ, `read()` không bị ngắt, tiến trình chạy tiếp | T9 |
 | **DL-10** | Đánh thức tiến trình SLEEPING | Con chờ trên `read()` pipe; cha gửi `SIGKILL` / `SIGTERM` / `SIGUSR1` có handler; lặp 500 vòng gửi đúng lúc con vừa vào `read()` | Con được đánh thức; `SIG_DFL` → thoát `-1`; có handler → `read()` trả `-1`, handler chạy, con chạy tiếp; **0 lần mất wakeup** | T4, T6, T10 |
-| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | Chờ luồng Ctrl-C (Kiên) |
+| **DL-11** | Bắt ngắt Ctrl+C | Chương trình chạy lặp vô tận, nhấn Ctrl+C | `SIGINT` kích hoạt handler thành công | `ctrlc_demo` (Kiên, Tuần 4)|
 | **DL-12** | Signal bị chặn không ngắt syscall | Chặn `SIGUSR2`, đang chờ `read()`, gửi `SIGUSR2` rồi ghi dữ liệu | `read()` vẫn chờ và nhận đúng dữ liệu | T12 |
 | **DL-13** | Stress đa CPU | `CPUS=4`: 4 tiến trình × 200 `kill()` đồng thời; 4 tiến trình cùng `SIGKILL` 4 nạn nhân | Không mất bit pending, không panic / deadlock | T11 |
 | **DL-14** | Gửi tới tiến trình ZOMBIE | Con `exit(7)` ngay, cha chưa `wait`, gửi `SIGUSR1` | `kill()` trả `-1`; `wait()` vẫn nhận status `7` | T13 |
 | **DL-15** | SIGKILL không chặn được khi đang ngủ | Con chặn tất cả signal rồi `pause(0x7fffffff)`; cha gửi `SIGKILL` | `SIGKILL` không nằm trong mask; con chết với status `-1` | T14 |
 | **DL-16** | Tự gửi signal có handler | `kill(getpid(), SIGUSR1)` khi có handler | Handler chạy xong trước khi `kill()` trả về | T15 |
+| **DL-17** | Từ chối signal không được hỗ trợ | `kill(self, 5)`, `kill(self, 31)`; `kill(self, SIGUSR2)` khi `SIG_IGN`; gửi signal 5 tới con đang chờ `read()` | Signal ngoài `SUPPORTED_MASK` trả `-1` và không đánh thức con; signal hỗ trợ vẫn trả `0` | T16 |
+| **DL-18** | Hành vi mặc định của 7 signal | Con `SIG_DFL`, không chặn, chờ `read()`; cha gửi lần lượt `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGTERM` | Con kết thúc với status `-1` ở cả 7 signal | T17 |
 
 ### 8.1. Kết quả chạy thực tế
 
@@ -330,3 +335,10 @@ Chạy trên `main@9880d92` + thay đổi Tuần 3 của module Delivery (`sleep
 | `make qemu CPUS=4` | 47/47 PASS (chạy lặp 3 lần) | ALL PASSED | 12/12 PASS | chạy đúng | OK | ALL TESTS PASSED |
 
 Không xuất hiện kernel panic hay treo ở cả hai cấu hình.
+
+Kết quả Tuần 5 (nhánh `feature/signal-core-w5`: thêm kiểm tra `SUPPORTED_MASK` trong `kkill()`, `sig_deliver()` dùng `killed(p)`, `killtest` Test 16–17):
+
+| Cấu hình | `killtest` | `usertests -q` |
+|---|---|---|
+| `make qemu CPUS=1` | 60/60 PASS | ALL TESTS PASSED |
+| `make qemu CPUS=4` | 60/60 PASS | ALL TESTS PASSED |

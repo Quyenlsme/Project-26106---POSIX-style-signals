@@ -27,7 +27,7 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ## 2. Ma trận Kiểm thử Chi tiết theo Module
 
-### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-16`)
+### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-18`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
@@ -47,6 +47,8 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **DL-14** | Gửi signal tới tiến trình ZOMBIE | Con `exit(7)` ngay, cha chưa `wait`, gửi `kill(pid, SIGUSR1)` | `kill()` trả `-1`; `wait()` vẫn nhận đúng status `7` | PASS — `killtest` T13 |
 | **DL-15** | SIGKILL khi đã chặn hết và đang `pause` | Con `sigprocmask(SIG_SETMASK, 0xFFFFFFFF)` rồi `pause(0x7fffffff)`; cha gửi `SIGKILL` | Mask thực tế không chứa `SIGKILL`; con kết thúc với status `-1`, không treo | PASS — `killtest` T14 |
 | **DL-16** | Tự gửi signal có handler | Đăng ký handler `SIGUSR1`, gọi `kill(getpid(), SIGUSR1)` | Handler đã chạy xong ngay khi `kill()` trả về | PASS — `killtest` T15 |
+| **DL-17** | Từ chối signal không được hỗ trợ | Gọi `kill(self, 5)`, `kill(self, 31)`; `kill(self, SIGUSR2)` khi `SIGUSR2` là `SIG_IGN`; con đang chờ `read()`, cha gửi `kill(pid, 5)` rồi ghi dữ liệu | Signal ngoài `SUPPORTED_MASK` trả `-1`, không bật bit pending, không đánh thức con; signal hỗ trợ (kể cả `SIG_IGN`) vẫn trả `0` | PASS — `killtest` T16 |
+| **DL-18** | Hành vi mặc định của 7 signal | Với từng `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGTERM`: con đặt `SIG_DFL`, bỏ chặn mọi signal, chờ `read()`; cha gửi signal | Cả 7 signal đều kết thúc con với status `-1` (đúng D5) | PASS — `killtest` T17 |
 
 ---
 
