@@ -27,7 +27,7 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ## 2. Ma trận Kiểm thử Chi tiết theo Module
 
-### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-16`)
+### 2.1. Module Delivery & Sending — Phạm Lê Quyền (`DL-01` đến `DL-18`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
@@ -47,10 +47,12 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **DL-14** | Gửi signal tới tiến trình ZOMBIE | Con `exit(7)` ngay, cha chưa `wait`, gửi `kill(pid, SIGUSR1)` | `kill()` trả `-1`; `wait()` vẫn nhận đúng status `7` | PASS — `killtest` T13 |
 | **DL-15** | SIGKILL khi đã chặn hết và đang `pause` | Con `sigprocmask(SIG_SETMASK, 0xFFFFFFFF)` rồi `pause(0x7fffffff)`; cha gửi `SIGKILL` | Mask thực tế không chứa `SIGKILL`; con kết thúc với status `-1`, không treo | PASS — `killtest` T14 |
 | **DL-16** | Tự gửi signal có handler | Đăng ký handler `SIGUSR1`, gọi `kill(getpid(), SIGUSR1)` | Handler đã chạy xong ngay khi `kill()` trả về | PASS — `killtest` T15 |
+| **DL-17** | Từ chối signal không được hỗ trợ | Gọi `kill(self, 5)`, `kill(self, 31)`; `kill(self, SIGUSR2)` khi `SIGUSR2` là `SIG_IGN`; con đang chờ `read()`, cha gửi `kill(pid, 5)` rồi ghi dữ liệu | Signal ngoài `SUPPORTED_MASK` trả `-1`, không bật bit pending, không đánh thức con; signal hỗ trợ (kể cả `SIG_IGN`) vẫn trả `0` | PASS — `killtest` T16 |
+| **DL-18** | Hành vi mặc định của 7 signal | Với từng `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGTERM`: con đặt `SIG_DFL`, bỏ chặn mọi signal, chờ `read()`; cha gửi signal | Cả 7 signal đều kết thúc con với status `-1` (đúng D5) | PASS — `killtest` T17 |
 
 ---
 
-### 2.2. Module Handler & Context — Trần Việt Hưng (`HD-01` đến `HD-13`)
+### 2.2. Module Handler & Context — Trần Việt Hưng (`HD-01` đến `HD-16`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
@@ -67,6 +69,9 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **HD-11** | Nested Handlers 3 tầng | Handler `SIGUSR1` gửi tiếp `SIGUSR2`; Handler `SIGUSR2` gửi tiếp `SIGALRM` | Ba handler được thực thi đúng thứ tự lồng nhau; unwind theo LIFO; signal mask được khôi phục chính xác | PASS — `regtest` REG-34 |
 | **HD-12** | User Stack không đủ chỗ chứa Signal Frame | Cố tình đặt `sp` tại vị trí không đủ không gian để kernel ghi `sigframe` | Tiến trình con kết thúc với trạng thái `-1`; kernel không panic | PASS — `regtest` REG-35 |
 | **HD-13** | Burst / Multiple Pending Signals | Chặn `SIGUSR1`, `SIGUSR2`, `SIGALRM`, gửi theo thứ tự ngược rồi bỏ chặn | Cả ba signal được xử lý đúng một lần theo thứ tự số hiệu tăng dần; các thanh ghi `s1-s11` được bảo toàn | PASS — `regtest` REG-36 |
+| **HD-14** | Sa_mask trì hoãn signal khác | Đăng ký handler `SIGUSR1` với `sa_mask` chứa `SIGUSR2`; gửi `SIGUSR2` trong khi handler `SIGUSR1` đang thực thi | `SIGUSR2` bị trì hoãn cho đến khi handler `SIGUSR1` kết thúc; sau đó handler `SIGUSR2` được thực thi | PASS — `regtest` REG-37; CPUS=1, CPUS=4 |
+| **HD-15** | Kiểm tra mask trong handler và khôi phục mask ban đầu | Thiết lập signal mask ban đầu, đăng ký handler và kiểm tra mask trong quá trình handler thực thi | Mask trong handler đúng theo cấu hình `sa_mask` và signal tự động bị chặn; sau `sigreturn`, mask ban đầu được khôi phục chính xác | PASS — `regtest` REG-38; CPUS=1, CPUS=4 |
+| **HD-16** | Re-arm SIGALRM và bảo toàn trạng thái CPU | Đăng ký handler `SIGALRM`, đặt alarm ban đầu; handler tự gọi lại `alarm()` cho đến đủ 5 lần; thực hiện tính toán và kiểm tra `s1-s11` | Handler được gọi đủ 5 lần; kết quả tính toán chính xác; các thanh ghi `s1-s11` được bảo toàn sau các lần xử lý signal | PASS — `regtest` REG-39; CPUS=1, CPUS=4 |
 
 ---
 
