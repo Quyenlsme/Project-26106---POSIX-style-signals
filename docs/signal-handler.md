@@ -218,40 +218,121 @@ if (num == SYS_sigreturn) {
 
 ---
 
+
 ## 6. Cơ chế Xử lý Tín hiệu Lồng nhau (Nested Handlers)
 
-```
-        USER STACK
- ┌──────────────────────┐
- │     Main Program     │
- ├──────────────────────┤
- │  sigframe (Signal A) │ ◄── Handler A đang chạy, bị Signal B ngắt
- ├──────────────────────┤
- │  sigframe (Signal B) │ ◄── Handler B được dựng đè bên dưới (LIFO)
- ├──────────────────────┤
- │   Handler B Stack    │ ◄── sp hiện tại đang chạy Handler B
- └──────────────────────┘
+Cơ chế Nested Handlers cho phép một handler đang thực thi tiếp tục bị ngắt bởi một tín hiệu khác, nếu tín hiệu đó không nằm trong `blocked_signals` hiện tại. Mỗi lần chuyển sang handler mới, kernel tạo một `struct sigframe` mới trên User Stack để lưu lại ngữ cảnh đang thực thi.
+
+### 6.1. Sơ đồ User Stack với 3 tầng Nested Handlers
+
+Giả sử chương trình chính lần lượt nhận `SIGUSR1`, `SIGUSR2` và `SIGALRM`, trong đó các tín hiệu tiếp theo được phép ngắt handler đang chạy:
+Sơ đồ minh họa bố trí stack theo thứ tự địa chỉ, không biểu diễn kích thước thực tế của từng vùng nhớ.
+```text
+              USER STACK
+          (Địa chỉ bộ nhớ cao)
+        ┌────────────────────────────┐
+        │       Main Program         │
+        │   Context ban đầu          │
+        ├────────────────────────────┤
+        │                            │
+        │      sigframe (A)          │
+        │      saved_tf: Main        │
+        │      saved_mask: M0        │
+        │                            │
+        ├────────────────────────────┤
+        │                            │
+        │      sigframe (B)          │
+        │      saved_tf: Handler A   │
+        │      saved_mask: M1        │
+        │                            │
+        ├────────────────────────────┤
+        │                            │
+        │      sigframe (C)          │
+        │      saved_tf: Handler B   │
+        │      saved_mask: M2        │
+        │                            │
+        ├────────────────────────────┤
+        │     Handler C Stack        │
+        │                            │
+        │     <- sp hiện tại         │
+        └────────────────────────────┘
+          (Địa chỉ bộ nhớ thấp)
+
+        Stack tăng trưởng về địa chỉ thấp
 ```
 
-1. Khi đang thực thi Handler A, nếu có Signal B đến (và B không nằm trong mặt nạ `blocked_signals` hiện hành):
-   - Con trỏ `sp` tiếp tục được giảm xuống thêm một khoảng `sizeof(struct sigframe)`.
-   - Khung `sigframe` của B được tạo đè lên dưới khung của A.
-   - CPU chuyển sang chạy Handler B.
-2. Handler B kết thúc -> gọi `sigreturn()`:
-   - Kernel giải phóng khung của B, khôi phục lại trạng thái thanh ghi và mặt nạ tín hiệu của Handler A.
-   - CPU quay trở lại thực thi tiếp phần còn lại của Handler A.
-3. Handler A kết thúc -> gọi `sigreturn()` lần 2:
-   - Kernel giải phóng khung của A, khôi phục lại trạng thái ban đầu của chương trình chính.
-4. **Cơ chế chống tràn ngăn xếp (Recursion Prevention):** Nhờ cơ chế tự động đưa chính tín hiệu đang xử lý vào mặt nạ chặn (`blocked_signals |= (1U << sig)`), nếu một tín hiệu cùng loại liên tục gửi đến, nó sẽ bị giữ ở trạng thái `pending` chứ không kích hoạt lồng đệ quy vô hạn làm sập stack.
-5. **Giới hạn độ sâu lồng nhau (Stack Limit):**
-   - Cơ chế nested handler sử dụng chính User Stack của tiến trình để lưu các `sigframe`.
-   - Trong thiết kế hiện tại, mỗi tiến trình có `USERSTACK = 1` (một trang User Stack).
-   - Mỗi lần phát sinh nested handler, kernel cần dành thêm không gian trên User Stack để lưu `sigframe` mới.
-   - Do dung lượng User Stack có giới hạn, độ sâu nested handler cũng bị giới hạn bởi không gian stack còn lại.
-   - Nếu không đủ không gian để đặt `sigframe`, thao tác dựng signal frame thất bại và tiến trình bị kết thúc với trạng thái `-1`, thay vì làm kernel panic.
+
+Trong sơ đồ:
+- `sigframe (A)` lưu ngữ cảnh chương trình chính trước khi chạy Handler A (`SIGUSR1`).
+- `sigframe (B)` lưu ngữ cảnh Handler A trước khi chạy Handler B (`SIGUSR2`).
+- `sigframe (C)` lưu ngữ cảnh Handler B trước khi chạy Handler C (`SIGALRM`).
+- `M0`, `M1`, `M2` lần lượt là signal mask trước mỗi lần chuyển sang handler mới.
+
+Mỗi `sigframe` có cấu trúc:
+
+```c
+struct sigframe {
+  struct trapframe saved_tf;
+  sigset_t saved_mask;
+};
+```
+
+### 6.2. Trình tự tạo và khôi phục các Signal Frame
+
+**Giai đoạn 1 – Tạo các frame:**
+
+1. Chương trình chính nhận `SIGUSR1`:
+   - Kernel tạo `sigframe (A)` để lưu context chương trình chính và mask hiện tại.
+   - Kernel chuyển CPU sang thực thi Handler A.
+
+2. Trong khi Handler A đang chạy, tiến trình nhận `SIGUSR2`:
+   - Nếu `SIGUSR2` không bị chặn, kernel tạo `sigframe (B)` để lưu context Handler A và mask hiện tại.
+   - Kernel chuyển CPU sang thực thi Handler B.
+
+3. Trong khi Handler B đang chạy, tiến trình nhận `SIGALRM`:
+   - Nếu `SIGALRM` không bị chặn, kernel tạo `sigframe (C)` để lưu context Handler B và mask hiện tại.
+   - Kernel chuyển CPU sang thực thi Handler C.
+
+**Giai đoạn 2 – Khôi phục theo LIFO:**
+
+1. Handler C kết thúc:
+   - Gọi `sigreturn()`.
+   - Kernel đọc `sigframe (C)`, khôi phục context Handler B và mask M2.
+
+2. Handler B tiếp tục và kết thúc:
+   - Gọi `sigreturn()`.
+   - Kernel đọc `sigframe (B)`, khôi phục context Handler A và mask M1.
+
+3. Handler A tiếp tục và kết thúc:
+   - Gọi `sigreturn()`.
+   - Kernel đọc `sigframe (A)`, khôi phục context chương trình chính và mask M0.
+
+Như vậy, thứ tự khôi phục là:
+
+```text
+Handler C
+    |
+    v
+sigreturn() -> Khôi phục Handler B
+    |
+    v
+sigreturn() -> Khôi phục Handler A
+    |
+    v
+sigreturn() -> Khôi phục Main Program
+```
+
+### 6.3. Giới hạn độ sâu Nested Handlers
+
+- Cơ chế nested handler sử dụng chính User Stack của tiến trình để lưu các `sigframe`.
+- Trong thiết kế hiện tại, mỗi tiến trình có `USERSTACK = 1` (một trang User Stack).
+- Mỗi lần phát sinh nested handler, kernel cần dành thêm không gian trên User Stack để lưu `sigframe` mới.
+- Do dung lượng User Stack có giới hạn, độ sâu nested handler cũng bị giới hạn bởi không gian stack còn lại.
+- Nếu không đủ không gian để đặt `sigframe`, thao tác dựng signal frame thất bại và tiến trình bị kết thúc với trạng thái `-1`, thay vì làm kernel panic.
+
 ---
 
-## 7. Ma trận Kiểm thử Module Handler (HD-01 đến HD-13)
+## 7. Ma trận Kiểm thử Module Handler (HD-01 đến HD-16)
 
 | Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi |
 |---|---|---|---|
@@ -268,3 +349,6 @@ if (num == SYS_sigreturn) {
 | **HD-11** | Nested Handlers 3 tầng | Handler `SIGUSR1` gửi tiếp `SIGUSR2`; Handler `SIGUSR2` gửi tiếp `SIGALRM` | Ba handler được thực thi đúng thứ tự lồng nhau; unwind theo LIFO; signal mask được khôi phục chính xác |
 | **HD-12** | User Stack không đủ chỗ chứa Signal Frame | Cố tình đặt `sp` tại vị trí không đủ không gian để kernel ghi `sigframe` | Tiến trình con kết thúc với trạng thái `-1`; kernel không panic |
 | **HD-13** | Burst / Multiple Pending Signals | Chặn `SIGUSR1`, `SIGUSR2`, `SIGALRM`, gửi theo thứ tự ngược rồi bỏ chặn | Cả ba signal được xử lý đúng một lần theo thứ tự số hiệu tăng dần; các thanh ghi `s1-s11` được bảo toàn |
+| **HD-14** | Sa_mask trì hoãn signal khác | Đăng ký handler `SIGUSR1` với `sa_mask` chứa `SIGUSR2`; gửi `SIGUSR2` trong khi handler `SIGUSR1` đang thực thi | `SIGUSR2` bị trì hoãn cho đến khi handler `SIGUSR1` kết thúc; sau đó handler `SIGUSR2` được thực thi |
+| **HD-15** | Kiểm tra mask trong handler và khôi phục mask ban đầu | Thiết lập signal mask ban đầu, đăng ký handler và kiểm tra mask trong quá trình handler thực thi | Mask trong handler đúng theo cấu hình `sa_mask` và signal tự động bị chặn; sau `sigreturn`, mask ban đầu được khôi phục chính xác |
+| **HD-16** | Re-arm SIGALRM và bảo toàn trạng thái CPU | Đăng ký handler `SIGALRM`, đặt alarm ban đầu; handler tự gọi lại `alarm()` cho đến đủ 5 lần; thực hiện tính toán và kiểm tra `s1-s11` | Handler được gọi đủ 5 lần; kết quả tính toán chính xác; các thanh ghi `s1-s11` được bảo toàn sau các lần xử lý signal |
