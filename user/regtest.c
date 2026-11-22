@@ -235,6 +235,99 @@ reg36_alrm_handler(int sig)
     reg36_error = 1;
 }
 
+// Bien va handler phuc vu REG-37 (HD-14: sa_mask defer signal)
+static volatile int reg37_order[4];
+static volatile int reg37_count = 0;
+static volatile int reg37_error = 0;
+
+void
+reg37_usr1_handler(int sig)
+{
+  if (sig != SIGUSR1)
+    reg37_error = 1;
+
+  // Ghi nhan SIGUSR1 handler bat dau.
+  if (reg37_count < 4)
+    reg37_order[reg37_count++] = 1;
+  else
+    reg37_error = 1;
+
+  // Gui SIGUSR2 trong khi SIGUSR1 handler dang chay.
+  if (kill(getpid(), SIGUSR2) < 0)
+    reg37_error = 1;
+
+  // Ghi nhan SIGUSR1 handler tiep tuc sau lenh kill.
+  if (reg37_count < 4)
+    reg37_order[reg37_count++] = 2;
+  else
+    reg37_error = 1;
+}
+
+void
+reg37_usr2_handler(int sig)
+{
+  if (sig != SIGUSR2)
+    reg37_error = 1;
+
+  // SIGUSR2 chi duoc chay sau khi SIGUSR1 handler ket thuc.
+  if (reg37_count < 4)
+    reg37_order[reg37_count++] = 3;
+  else
+    reg37_error = 1;
+
+  if (reg37_count < 4)
+    reg37_order[reg37_count++] = 4;
+  else
+    reg37_error = 1;
+}
+
+// Bien va handler phuc vu REG-38 (HD-15)
+static volatile unsigned int reg38_handler_mask = 0;
+static volatile int reg38_handler_called = 0;
+static volatile int reg38_error = 0;
+
+void
+reg38_usr1_handler(int sig)
+{
+  unsigned int current_mask = 0;
+
+  if (sig != SIGUSR1)
+    reg38_error = 1;
+
+  reg38_handler_called++;
+
+  if (sigprocmask(SIG_BLOCK, 0, &current_mask) < 0) {
+    reg38_error = 1;
+    return;
+  }
+
+  reg38_handler_mask = current_mask;
+}
+
+// Bien va handler phuc vu REG-39 (HD-16)
+#define REG39_ROUNDS 5
+#define REG39_PERIOD 10
+
+static volatile int reg39_fired = 0;
+static volatile int reg39_error = 0;
+
+void
+reg39_alrm_handler(int sig)
+{
+  if (sig != SIGALRM) {
+    reg39_error = 1;
+    return;
+  }
+
+  reg39_fired++;
+
+  // Tu dang ky lai alarm cho den khi du 5 lan.
+  if (reg39_fired < REG39_ROUNDS) {
+    if (alarm(REG39_PERIOD) < 0)
+      reg39_error = 1;
+  }
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1705,6 +1798,325 @@ main(int argc, char *argv[])
       for (int i = 0; i < 11; i++)
         printf("s%d expected=0x%x actual=0x%lx\n", i + 1, 0x101 + i,
                out_regs[i]);
+
+      exit(1);
+    }
+  }
+
+  // REG-37: HD-14 - sa_mask defers another signal
+  {
+    struct sigaction act1, act2;
+    struct sigaction old1, old2;
+    sigset_t set, oldmask, testmask;
+    int expected[4] = {1, 2, 3, 4};
+    int pass = 1;
+
+    // Block SIGUSR1 va SIGUSR2, dong thoi luu mask cu.
+    set = (1U << SIGUSR1) | (1U << SIGUSR2);
+
+    if (sigprocmask(SIG_BLOCK, &set, &oldmask) < 0) {
+      printf("REG-37 FAIL: cannot block signals\n");
+      exit(1);
+    }
+
+    // Dang ky SIGUSR1 handler voi sa_mask chua SIGUSR2.
+    memset(&act1, 0, sizeof(act1));
+    memset(&act2, 0, sizeof(act2));
+
+    act1.sa_handler = reg37_usr1_handler;
+    act1.sa_mask = (1U << SIGUSR2);
+    act1.sa_restorer = sigrestorer;
+
+    act2.sa_handler = reg37_usr2_handler;
+    act2.sa_mask = 0;
+    act2.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGUSR1, &act1, &old1) < 0 ||
+        sigaction(SIGUSR2, &act2, &old2) < 0) {
+      printf("REG-37 FAIL: sigaction\n");
+      exit(1);
+    }
+
+    // Reset bien theo doi.
+    reg37_count = 0;
+    reg37_error = 0;
+
+    for (int i = 0; i < 4; i++)
+      reg37_order[i] = 0;
+
+    // Giu nguyen cac mask khac, chi unblock SIGUSR1 va SIGUSR2.
+    testmask = oldmask & ~set;
+
+    if (sigprocmask(SIG_SETMASK, &testmask, 0) < 0) {
+      printf("REG-37 FAIL: cannot set test mask\n");
+      exit(1);
+    }
+
+    // Gui SIGUSR1 de bat dau kiem tra.
+    if (kill(getpid(), SIGUSR1) < 0) {
+      printf("REG-37 FAIL: cannot send SIGUSR1\n");
+      exit(1);
+    }
+
+    // Kiem tra thu tu thuc thi hai handler.
+    if (reg37_count != 4 || reg37_error)
+      pass = 0;
+
+    for (int i = 0; i < 4; i++) {
+      if (reg37_order[i] != expected[i])
+        pass = 0;
+    }
+
+    // Khoi phuc handler va signal mask ban dau.
+    sigaction(SIGUSR1, &old1, 0);
+    sigaction(SIGUSR2, &old2, 0);
+    sigprocmask(SIG_SETMASK, &oldmask, 0);
+
+    if (pass) {
+      printf(
+        "REG-37 PASS: sa_mask deferred SIGUSR2 until SIGUSR1 handler returned (HD-14)\n");
+    } else {
+      printf("REG-37 FAIL: count=%d, error=%d, order=", reg37_count,
+             reg37_error);
+
+      for (int i = 0; i < reg37_count && i < 4; i++)
+        printf("%d ", reg37_order[i]);
+
+      printf("\n");
+      exit(1);
+    }
+  }
+
+  // REG-38: HD-15 - Kiem tra mask trong handler va khoi phuc mask ban dau
+  {
+    struct sigaction act, oldact;
+    sigset_t set, oldmask;
+    sigset_t initial_mask;
+    sigset_t current_mask;
+
+    unsigned int expected_handler_mask;
+    int pass = 1;
+
+    // Chan cac signal duoc su dung va luu mask ban dau.
+    set = (1U << SIGUSR1) | (1U << SIGUSR2) | (1U << SIGALRM);
+
+    if (sigprocmask(SIG_BLOCK, &set, &oldmask) < 0) {
+      printf("REG-38 FAIL: cannot block signals\n");
+      exit(1);
+    }
+
+    // Chon SIGALRM lam signal phai duoc giu block.
+    initial_mask = (1U << SIGALRM);
+
+    // Dang ky SIGUSR1 handler voi sa_mask chua SIGUSR2.
+    act.sa_handler = reg38_usr1_handler;
+    act.sa_mask = (1U << SIGUSR2);
+    act.sa_flags = 0;
+    act.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGUSR1, &act, &oldact) < 0) {
+      printf("REG-38 FAIL: sigaction\n");
+      exit(1);
+    }
+
+    reg38_handler_mask = 0;
+    reg38_handler_called = 0;
+    reg38_error = 0;
+
+    // Dat mask ban dau: chi block SIGALRM.
+    if (sigprocmask(SIG_SETMASK, &initial_mask, 0) < 0) {
+      printf("REG-38 FAIL: cannot set initial mask\n");
+      exit(1);
+    }
+
+    // Gui SIGUSR1 de kich hoat handler.
+    if (kill(getpid(), SIGUSR1) < 0) {
+      printf("REG-38 FAIL: kill\n");
+      exit(1);
+    }
+
+    // Trong handler phai block SIGALRM, SIGUSR1 va SIGUSR2.
+    expected_handler_mask = initial_mask | (1U << SIGUSR1) | (1U << SIGUSR2);
+
+    if (reg38_handler_called != 1 || reg38_error)
+      pass = 0;
+
+    if (reg38_handler_mask != expected_handler_mask)
+      pass = 0;
+
+    // Doc mask sau khi handler ket thuc.
+    if (sigprocmask(SIG_BLOCK, 0, &current_mask) < 0) {
+      printf("REG-38 FAIL: cannot read current mask\n");
+      exit(1);
+    }
+
+    // Mask phai duoc khoi phuc dung ve trang thai ban dau.
+    if (current_mask != initial_mask)
+      pass = 0;
+
+    // Khoi phuc handler va mask truoc khi kiem thu.
+    if (sigaction(SIGUSR1, &oldact, 0) < 0) {
+      printf("REG-38 FAIL: cannot restore sigaction\n");
+      exit(1);
+    }
+
+    if (sigprocmask(SIG_SETMASK, &oldmask, 0) < 0) {
+      printf("REG-38 FAIL: cannot restore original mask\n");
+      exit(1);
+    }
+
+    if (pass) {
+      printf(
+        "REG-38 PASS: handler mask correct and original mask restored (HD-15)\n");
+    } else {
+      printf("REG-38 FAIL: called=%d, error=%d\n", reg38_handler_called,
+             reg38_error);
+      printf("Handler mask: %x, expected: %x\n", reg38_handler_mask,
+             expected_handler_mask);
+      printf("Current mask: %x, expected: %x\n", current_mask, initial_mask);
+      exit(1);
+    }
+  }
+
+  // REG-39: HD-16 - Re-arm SIGALRM 5 lan,
+  // kiem tra tinh toan va bao toan thanh ghi s1-s11
+  {
+    struct sigaction act, oldact;
+    sigset_t set, oldmask, testmask;
+
+    uint64 out_regs[13];
+    uint64 expected_sum;
+    int pass = 1;
+
+    // Chi su dung SIGALRM trong bai kiem thu.
+    set = (1U << SIGALRM);
+
+    // Chan SIGALRM va luu mask ban dau.
+    if (sigprocmask(SIG_BLOCK, &set, &oldmask) < 0) {
+      printf("REG-39 FAIL: cannot block SIGALRM\n");
+      exit(1);
+    }
+
+    // Dang ky handler.
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = reg39_alrm_handler;
+    act.sa_mask = 0;
+    act.sa_flags = 0;
+    act.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGALRM, &act, &oldact) < 0) {
+      printf("REG-39 FAIL: sigaction\n");
+      exit(1);
+    }
+
+    reg39_fired = 0;
+    reg39_error = 0;
+
+    // Giu cac mask khac, chi unblock SIGALRM.
+    testmask = oldmask & ~set;
+
+    if (sigprocmask(SIG_SETMASK, &testmask, 0) < 0) {
+      printf("REG-39 FAIL: cannot unblock SIGALRM\n");
+      exit(1);
+    }
+
+    // Dat alarm lan dau tien.
+    if (alarm(REG39_PERIOD) < 0) {
+      printf("REG-39 FAIL: cannot start alarm\n");
+      exit(1);
+    }
+
+    // Vua tinh tong, vua goi getpid de tao cac diem
+    // quay ve user mode trong qua trinh cho SIGALRM.
+    //
+    // s1-s11: cac gia tri can kiem tra bao toan.
+    // t2: so lan lap.
+    // t3: tong 1 + 2 + ... + t2.
+    asm volatile("li s1, 0x101\n"
+                 "li s2, 0x102\n"
+                 "li s3, 0x103\n"
+                 "li s4, 0x104\n"
+                 "li s5, 0x105\n"
+                 "li s6, 0x106\n"
+                 "li s7, 0x107\n"
+                 "li s8, 0x108\n"
+                 "li s9, 0x109\n"
+                 "li s10, 0x10a\n"
+                 "li s11, 0x10b\n"
+
+                 "li t2, 0\n"
+                 "li t3, 0\n"
+
+                 "1:\n"
+                 "addi t2, t2, 1\n"
+                 "add t3, t3, t2\n"
+
+                 // Goi getpid (syscall number 11).
+                 "li a7, 11\n"
+                 "ecall\n"
+
+                 // Kiem tra so lan SIGALRM da duoc xu ly.
+                 "lw t0, 0(%0)\n"
+                 "li t1, 5\n"
+                 "blt t0, t1, 1b\n"
+
+                 // Luu cac thanh ghi sau khi 5 handler ket thuc.
+                 "sd s1, 0(%1)\n"
+                 "sd s2, 8(%1)\n"
+                 "sd s3, 16(%1)\n"
+                 "sd s4, 24(%1)\n"
+                 "sd s5, 32(%1)\n"
+                 "sd s6, 40(%1)\n"
+                 "sd s7, 48(%1)\n"
+                 "sd s8, 56(%1)\n"
+                 "sd s9, 64(%1)\n"
+                 "sd s10, 72(%1)\n"
+                 "sd s11, 80(%1)\n"
+
+                 // Luu so lan lap va ket qua tinh tong.
+                 "sd t2, 88(%1)\n"
+                 "sd t3, 96(%1)\n"
+
+                 :
+                 : "r"(&reg39_fired), "r"(out_regs)
+                 : "a0", "a7", "t0", "t1", "t2", "t3", "s1", "s2", "s3", "s4",
+                   "s5", "s6", "s7", "s8", "s9", "s10", "s11", "memory");
+
+    // Kiem tra handler duoc goi dung 5 lan.
+    if (reg39_fired != REG39_ROUNDS || reg39_error)
+      pass = 0;
+
+    // Kiem tra bao toan cac thanh ghi s1-s11.
+    for (int i = 0; i < 11; i++) {
+      if (out_regs[i] != (uint64)(0x101 + i))
+        pass = 0;
+    }
+
+    // Kiem tra tinh toan:
+    // 1 + 2 + ... + n = n * (n + 1) / 2.
+    expected_sum = out_regs[11] * (out_regs[11] + 1) / 2;
+
+    if (out_regs[11] == 0 || out_regs[12] != expected_sum)
+      pass = 0;
+
+    // Huy alarm va khoi phuc trang thai ban dau.
+    alarm(0);
+    sigaction(SIGALRM, &oldact, 0);
+    sigprocmask(SIG_SETMASK, &oldmask, 0);
+
+    if (pass) {
+      printf(
+        "REG-39 PASS: SIGALRM re-armed 5 times, computation and s1-s11 preserved (HD-16)\n");
+    } else {
+      printf("REG-39 FAIL: fired=%d, error=%d\n", reg39_fired, reg39_error);
+
+      for (int i = 0; i < 11; i++) {
+        printf("s%d expected=0x%x actual=0x%lx\n", i + 1, 0x101 + i,
+               out_regs[i]);
+      }
+
+      printf("iterations=%ld, sum=%ld, expected_sum=%ld\n", out_regs[11],
+             out_regs[12], expected_sum);
 
       exit(1);
     }
