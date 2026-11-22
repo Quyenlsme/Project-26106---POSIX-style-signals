@@ -7,6 +7,7 @@
 # ./test-xv6.py -q usertests (runs the quick tests of usertests)
 # ./test-xv6.py crash  (runs the crash tests)
 # ./test-xv6.py log (runs the log crash test)
+# ./test-xv6.py signals (runs POSIX signal tests: AU-01..AU-03)
 
 import argparse, os, inspect, re, signal, subprocess, sys, time
 from subprocess import run
