@@ -1,0 +1,55 @@
+=== Chạy kiểm thử tự động hệ thống POSIX Signals (Project 26106) ===
+Namespace(testrex='signals', q=False)
+=== TEST SIGNALS (AU-01, AU-02, AU-03) ===
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2 -ffile-prefix-map=/home/tranviethung_20233434/Project-26106---POSIX-style-signals=. -march=rv64gc -std=gnu99 -MD -mcmodel=medany -ffreestanding -fno-common -nostdlib -fno-delete-null-pointer-checks -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc -fno-builtin-free -fno-builtin-memcpy -Wno-main -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf -I. -fno-stack-protector -fno-pie -no-pie   -c -o kernel/console.o kernel/console.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T kernel/kernel.ld -o kernel/kernel kernel/entry.o kernel/start.o kernel/console.o kernel/printk.o kernel/uart.o kernel/kalloc.o kernel/spinlock.o kernel/string.o kernel/main.o kernel/vm.o kernel/proc.o kernel/swtch.o kernel/trampoline.o kernel/trap.o kernel/syscall.o kernel/sysproc.o kernel/bio.o kernel/fs.o kernel/log.o kernel/sleeplock.o kernel/file.o kernel/pipe.o kernel/exec.o kernel/sysfile.o kernel/kernelvec.o kernel/plic.o kernel/virtio_disk.o 
+riscv64-unknown-elf-ld: warning: kernel/kernel has a LOAD segment with RWX permissions
+riscv64-unknown-elf-objdump -S kernel/kernel > kernel/kernel.asm
+riscv64-unknown-elf-objdump -t kernel/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > kernel/kernel.sym
+riscv64-unknown-elf-gcc -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2 -ffile-prefix-map=/home/tranviethung_20233434/Project-26106---POSIX-style-signals=. -march=rv64gc -std=gnu99 -MD -mcmodel=medany -ffreestanding -fno-common -nostdlib -fno-delete-null-pointer-checks -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc -fno-builtin-free -fno-builtin-memcpy -Wno-main -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf -I. -fno-stack-protector -fno-pie -no-pie   -c -o user/sh.o user/sh.c
+riscv64-unknown-elf-ld -z max-page-size=4096 -T user/user.ld -o user/_sh user/sh.o user/ulib.o user/usys.o user/printf.o user/umalloc.o
+riscv64-unknown-elf-objdump -S user/_sh > user/sh.asm
+riscv64-unknown-elf-objdump -t user/_sh | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$/d' > user/sh.sym
+mkfs/mkfs fs.img README user/_cat user/_echo user/_forktest user/_grep user/_init user/_kill user/_ln user/_ls user/_mkdir user/_rm user/_sh user/_stressfs user/_usertests user/_grind user/_wc user/_zombie user/_logstress user/_forphan user/_dorphan user/_sync user/_killtest user/_sigtest user/_pausetest user/_alarm_demo user/_mask_demo user/_regtest user/_ctrlc_demo
+nmeta 47 (boot, super, log blocks 31, inode blocks 13, bitmap blocks 1) blocks 1953 total 2000
+balloc: first 1373 blocks have been allocated
+balloc: write bitmap block at sector 46
+$ 
+--- AU-01: Running unit tests (sigtest, pausetest, killtest, regtest) ---
+Running sigtest...
+  ALL TESTS PASSED SUCCESSFULLY!
+sigtest OK
+Running pausetest...
+pausetest: ALL PASSED
+pausetest OK
+Running killtest...
+killtest: ALL PASSED
+killtest OK
+Running regtest...
+===== TEST COMPLETED =====
+regtest OK
+--- AU-02: Running demos (alarm_demo, mask_demo) ---
+Running alarm_demo...
+[DEMO 2] done: 5 alarms, pause interrupted 5 times, elapsed=50 ticks
+alarm_demo OK
+Running mask_demo...
+[DEMO 3] after unblock: count=1 (expect 1, 3 sends coalesced)
+mask_demo OK
+--- AU-03: Automated Ctrl-C testing (DL-11) ---
+Testing Ctrl-C at shell prompt...
+$ echo OK_SHELL_CTRLC
+OK_SHELL_CTRLC
+Ctrl-C at shell prompt OK
+Testing ctrlc_demo with handler...
+Running...
+[DEMO 1] Caught Ctrl+C (SIGINT)! Cleaning up and exiting...
+ctrlc_demo handler OK
+Testing ctrlc_demo with SIG_DFL...
+Running...
+Running...
+Running...
+Running...
+$ echo OK_AFTER_DFL
+OK_AFTER_DFL
+ctrlc_demo SIG_DFL OK
+=== ALL SIGNAL TESTS PASSED (AU-01, AU-02, AU-03) ===
