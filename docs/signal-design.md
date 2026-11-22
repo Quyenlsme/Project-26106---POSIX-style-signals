@@ -151,3 +151,51 @@ Tuyệt đối không lồng hai khóa này vào nhau để triệt tiêu hoàn 
 | `setfg` | `27` | `int setfg(int);` | `void console_setfg(int);` |
 | `kill` | `6` (sửa đổi) | `int kill(int, int);` | `int kkill(int, int);` |
 
+---
+
+## 6. Quy tắc Signal của Toàn bộ Hệ thống (System Signal Invariants)
+
+Nhóm thống nhất 8 bất biến kỹ thuật cốt lõi chi phối toàn bộ hành vi xử lý tín hiệu trên xv6-riscv, mỗi quy tắc đều được chứng minh bằng các bài kiểm thử thực tế:
+
+1. **Gộp tín hiệu lặp lại (Signal Coalescing):**
+   - Trạng thái tín hiệu chờ được lưu dưới dạng bitmask `p->pending_signals`.
+   - Nếu cùng một tín hiệu được gửi nhiều lần liên tiếp khi tiến trình chưa kịp xử lý hoặc đang bị chặn, bitmask chỉ giữ một bit `1`.
+   - Khi unblock, handler chỉ thực thi đúng 1 lần duy nhất.
+   - *Chứng minh:* Kiểm thử `DL-04`, `killtest` Test 7.
+
+2. **Thứ tự ưu tiên giao tín hiệu (Deterministic Signal Priority):**
+   - Khi có nhiều tín hiệu đủ điều kiện giao cùng lúc (`ready = pending & ~blocked`), kernel luôn chọn tín hiệu có số hiệu nhỏ nhất trước (duyệt từ bit 1 đến bit 31).
+   - *Chứng minh:* Kiểm thử `DL-05` (`killtest` Test 8), `HD-13` (`regtest` REG-36).
+
+3. **`SIGKILL` là tối cao — Không thể chặn hoặc bắt (Unblockable & Uncatchable):**
+   - `sigprocmask()` tự động lọc bỏ bit `SIGKILL` khỏi tập bị chặn qua `sig_sanitize()`.
+   - `sigaction()` từ chối đăng ký handler hoặc ignore cho `SIGKILL` (trả về `-1`).
+   - `SIGKILL` đánh thức tiến trình và kết thúc tiến trình ngay cả khi đang ngủ trong `pause()`.
+   - *Chứng minh:* `DL-15` (`killtest` Test 14), `MK-05` (`regtest` REG-09, REG-20), `HD-02` (`regtest` REG-11, REG-12).
+
+4. **Tự động chặn và `sa_mask` trong khi chạy Handler:**
+   - Khi CPU nhảy vào handler của tín hiệu `sig`, kernel tự động thêm chính `sig` và toàn bộ mặt nạ `act->sa_mask` vào `blocked_signals`.
+   - Ngăn chặn đệ quy vô hạn làm sập stack, đồng thời hoãn các tín hiệu trong `sa_mask` cho tới khi handler kết thúc.
+   - Khi gọi `sigreturn()`, mask cũ được khôi phục chính xác về trạng thái trước khi nhận ngắt.
+   - *Chứng minh:* `HD-06` (REG-05), `HD-08` (REG-30), `HD-14` (REG-37), `HD-15` (REG-38).
+
+5. **Ngắt System Call và trả về `-1`:**
+   - Khi tiến trình đang ngủ chờ trong các syscall có thể ngắt (`consoleread`, `piperead`, `pipewrite`, `kwait`, `sys_pause`), sự xuất hiện của tín hiệu có handler sẽ đánh thức tiến trình qua `sleep_prepare_intr()`, xóa `p->chan`, và syscall trả về `-1`.
+   - Tín hiệu được giao ngay ở lần trở về user mode của chính syscall đó.
+   - *Chứng minh:* `DL-10` (`killtest` T4, T6, T10), `PA-02`, `PA-05`.
+
+6. **Kế thừa trạng thái qua `fork()` và `exec()`:**
+   - Qua `fork()`: tiến trình con thừa kế toàn bộ cấu hình `sig_actions[]` và `blocked_signals` của cha; `pending_signals` và `alarm_deadline` được reset về 0 (con không thừa kế timer của cha).
+   - Qua `exec()`: toàn bộ handler tùy biến được reset về `SIG_DFL` (vì mã hàm của handler cũ không còn trong không gian địa chỉ mới); `blocked_signals` được giữ nguyên.
+   - *Chứng minh:* `IN-03` (REG-25, REG-26, REG-27), `IN-04` (REG-28), `AL-07` (`sigtest` T2.6).
+
+7. **Hành vi mặc định (`SIG_DFL`):**
+   - Mọi tín hiệu được hỗ trợ (`SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGTERM`) nếu không đăng ký handler thì hành vi mặc định là kết thúc tiến trình với exit code `-1`.
+   - *Chứng minh:* `DL-08`, `DL-18`.
+
+8. **Định tuyến Ngắt Thiết bị (Ctrl-C $\to$ `SIGINT`):**
+   - Xử lý hoàn toàn trong ngữ cảnh ngắt UART (`consoleintr`), tuân thủ nghiêm ngặt thứ tự khóa `cons.lock -> p->lock`.
+   - Kernel chỉ chuyển tín hiệu cho tiến trình tiền cảnh (`fg_pid > 0`) do shell đăng ký qua syscall `setfg(pid)`.
+   - Tuyệt đối không chạy user handler trong interrupt context; handler chỉ được thực thi khi tiến trình tiền cảnh quay về user mode.
+   - *Chứng minh:* `DL-11`, `AU-03`.
+

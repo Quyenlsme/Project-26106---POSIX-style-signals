@@ -229,6 +229,87 @@ def test_usertests(test=""):
     q.monitor('^ALL TESTS PASSED', progress='test', timeout=timeout)
     q.stop()
 
+def test_signals():
+    print("=== TEST SIGNALS (AU-01, AU-02, AU-03) ===")
+    q = QEMU(True)
+    q.monitor(r'.*\$ ', timeout=30)
+
+    # AU-01: Unit tests
+    print("--- AU-01: Running unit tests (sigtest, pausetest, killtest, regtest) ---")
+
+    print("Running sigtest...")
+    q.cmd("sigtest\n")
+    q.monitor(r'.*ALL TESTS PASSED SUCCESSFULLY!', timeout=30)
+    time.sleep(0.5)
+    print("sigtest OK")
+
+    print("Running pausetest...")
+    q.cmd("pausetest\n")
+    q.monitor(r'.*pausetest: ALL PASSED', timeout=30)
+    time.sleep(0.5)
+    print("pausetest OK")
+
+    print("Running killtest...")
+    q.cmd("killtest\n")
+    q.monitor(r'.*killtest: ALL PASSED', timeout=60)
+    time.sleep(0.5)
+    print("killtest OK")
+
+    print("Running regtest...")
+    q.cmd("regtest\n")
+    q.monitor(r'.*TEST COMPLETED', timeout=60)
+    time.sleep(0.5)
+    print("regtest OK")
+
+    # AU-02: Demos
+    print("--- AU-02: Running demos (alarm_demo, mask_demo) ---")
+
+    print("Running alarm_demo...")
+    q.cmd("alarm_demo\n")
+    q.monitor(r'.*\[DEMO 2\] done: 5 alarms', timeout=30)
+    time.sleep(0.5)
+    print("alarm_demo OK")
+
+    print("Running mask_demo...")
+    q.cmd("mask_demo\n")
+    q.monitor(r'.*\[DEMO 3\] after unblock: count=1', timeout=30)
+    time.sleep(0.5)
+    print("mask_demo OK")
+
+    # AU-03: Ctrl-C automated test (DL-11)
+    print("--- AU-03: Automated Ctrl-C testing (DL-11) ---")
+
+    print("Testing Ctrl-C at shell prompt...")
+    q.cmd(b'\x03')
+    time.sleep(0.5)
+    q.cmd("echo OK_SHELL_CTRLC\n")
+    q.monitor(r'.*OK_SHELL_CTRLC', timeout=10)
+    time.sleep(0.5)
+    print("Ctrl-C at shell prompt OK")
+
+    print("Testing ctrlc_demo with handler...")
+    q.cmd("ctrlc_demo\n")
+    q.monitor(r'.*Running\.\.\.', timeout=15)
+    time.sleep(0.2)
+    q.cmd(b'\x03')
+    q.monitor(r'.*\[DEMO 1\] Caught Ctrl\+C \(SIGINT\)! Cleaning up and exiting\.\.\.', timeout=15)
+    time.sleep(0.5)
+    print("ctrlc_demo handler OK")
+
+    print("Testing ctrlc_demo with SIG_DFL...")
+    q.cmd("ctrlc_demo dfl\n")
+    q.monitor(r'.*Running\.\.\.', timeout=15)
+    time.sleep(0.2)
+    q.cmd(b'\x03')
+    time.sleep(0.5)
+    q.cmd("echo OK_AFTER_DFL\n")
+    q.monitor(r'.*OK_AFTER_DFL', timeout=10)
+    time.sleep(0.5)
+    print("ctrlc_demo SIG_DFL OK")
+
+    q.stop()
+    print("=== ALL SIGNAL TESTS PASSED (AU-01, AU-02, AU-03) ===")
+
 def main():
     print(args)
     rex = r'%s' % args.testrex
@@ -243,4 +324,5 @@ def main():
     if none:
         test_usertests(test=args.testrex)
 
-main()
+if __name__ == '__main__':
+    main()

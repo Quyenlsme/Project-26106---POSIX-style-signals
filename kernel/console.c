@@ -167,8 +167,12 @@ consoleintr(int c)
     consputc('C');
     consputc('\n');
     cons.e = cons.w; // Discard uncommitted line input
-    if (fg_pid > 0)
+    if (fg_pid > 0) {
       kkill(fg_pid, SIGINT);
+    } else {
+      consputc('$');
+      consputc(' ');
+    }
     break;
   case C('P'): // Print process list.
     procdump();
