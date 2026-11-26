@@ -1,6 +1,6 @@
 # Hướng dẫn AI làm việc với dự án POSIX-style signals trên xv6-riscv
 
-*Cập nhật: 20/11/2026, sau tuần 4 (`main@1e875f9`). Bản đầu: 24/10/2026.*
+*Cập nhật: 26/11/2026, đầu tuần 6 (`main@4803454`). Bản đầu: 24/10/2026.*
 
 ## 1. Context và mục tiêu
 
@@ -52,8 +52,8 @@ Nếu không thể chạy QEMU hoặc thiếu toolchain, báo rõ giới hạn. 
 | Thành viên | Module chính | Trách nhiệm liên quan |
 |---|---|---|
 | **Phạm Lê Quyền** | Signal sending & delivery | `kkill()`, `sig_send()`, `sig_deliver()`, pending signals, lựa chọn signal, hành động mặc định, vòng đời process và wakeup (`sleep_prepare_intr`), lock order trong `signal-core-locking.md`; test `killtest` |
-| **Trần Việt Hưng** | Signal handler & context | `ksigaction()`, `sig_setup_frame()`, `ksigreturn()`, `struct sigframe`, khôi phục thanh ghi, nested handlers, `sa_mask`; test `regtest` |
-| **Nguyễn Trung Kiên** | Mask, timer, shell và tích hợp | `ksigprocmask()`, `kalarm()`, `sig_alarm_check()`, `pause`; Ctrl+C → SIGINT (`fg_pid`, `console_setfg`, syscall `setfg`, `sh.c`); test `sigtest`, `pausetest`, 3 chương trình demo; tự động hóa test và CI |
+| **Trần Việt Hưng** | Signal handler & context | `sys_sigaction()`, `sig_setup_frame()`, `sys_sigreturn()`, `struct sigframe`, khôi phục thanh ghi, nested handlers, `sa_mask`; test `regtest` |
+| **Nguyễn Trung Kiên** | Mask, timer, shell và tích hợp | `sys_sigprocmask()`, `sys_alarm()`, `sig_alarm_check()`, `pause`; Ctrl+C → SIGINT (`fg_pid`, `console_setfg`, syscall `setfg`, `sh.c`); test `sigtest`, `pausetest`, 3 chương trình demo; tự động hóa test và CI |
 
 - Mỗi thành viên chịu trách nhiệm **code, test và tài liệu** của module mình; không đẩy toàn bộ việc test sang Kiên.
 - Review chéo mặc định: **Hưng review Quyền; Kiên review Hưng; Quyền review Kiên**. Review do AI gợi ý không thay cho review thực tế của thành viên.
@@ -135,8 +135,8 @@ Các quyết định đã chốt nằm trong `docs/signal-design.md` (D1–D6) v
 - Signal bị block **vẫn pending**; unmask kích hoạt delivery tại điểm trở về user mode.
 - `alarm(n)` tính deadline tuyệt đối `ticks + n`, so sánh có dấu trong `clockintr` trên CPU 0; `alarm(0)` hủy; alarm mới thay alarm cũ; không kế thừa qua `fork`, hủy khi `exec`.
 - Timer interrupt chỉ đặt bit pending; không chạy handler user trong timer interrupt. Demo periodic tự re-arm trong handler.
-- **Ctrl+C:** `consoleintr()` nhận `0x03`, in `^C`, gọi `kkill(fg_pid, SIGINT)` dưới `cons.lock`; `sh.c` gọi `setfg(pid)` sau `fork` và `setfg(0)` sau `wait`. Giới hạn đã ghi: chỉ ngắt con trực tiếp của shell; khe giữa `fork` và `setfg`; chưa in lại `$` sau Ctrl+C tại dấu nhắc.
-- Test tối thiểu: block/unblock, pending khi masked, nhiều signals, alarm one-shot/re-arm/thay/hủy, race với exit, alarm + mask, 3 tình huống Ctrl+C (tại dấu nhắc, có handler, `SIG_DFL`).
+- **Ctrl+C:** `consoleintr()` nhận `0x03`, in `^C`, gọi `kkill(fg_pid, SIGINT)` dưới `cons.lock` (hoặc in lại `$ ` nếu `fg_pid == 0`); `sh.c` gọi `setfg()` ở cả con (`getpid()`) và cha (`pid`) sau `fork`, rồi `setfg(0)` sau `wait`. Giới hạn đã ghi: chỉ ngắt con trực tiếp của shell (chưa có process group cho pipeline).
+- Test tối thiểu: block/unblock, pending khi masked, nhiều signals, alarm one-shot/re-arm/thay/hủy, race với exit, alarm + mask, 4 tình huống Ctrl+C (tại dấu nhắc, có handler, `SIG_DFL`, tiến trình chạy nền `&`).
 
 ## 10. Build và kiểm thử
 
@@ -144,14 +144,14 @@ Các quyết định đã chốt nằm trong `docs/signal-design.md` (D1–D6) v
 
 | Lệnh / chương trình | Mục đích |
 |---|---|
-| `make clean && make qemu CPUS=1` / `CPUS=4` | Build và boot; mọi test chạy ở cả hai cấu hình |
+| `make clean && make qemu CPUS=1` / `CPUS=4` | Build và boot; mọi test chạy ở cả hai cấu hình (mặc định `CPUS=3`) |
 | `make fmt` | clang-format toàn bộ `kernel/`, `user/`, `mkfs/` |
 | `killtest` | Signal core, mã DL-xx (Quyền) |
 | `regtest` | Handler, mã HD-xx và REG-xx (Hưng) |
 | `sigtest`, `pausetest` | Mask, alarm, pause, mã MK/AL/PA-xx (Kiên) |
 | `ctrlc_demo [dfl]`, `alarm_demo`, `mask_demo` | 3 demo bắt buộc; kịch bản trong `docs/test-plan.md` §3 |
 | `usertests -q`, `forktest` | Hồi quy xv6 gốc (RG-01) |
-| `./test-xv6.py usertests`, `./test-xv6.py crash` | Bước CI; cần Python 3 và QEMU trên host |
+| `./test-xv6.py signals`, `./test-xv6.py usertests`, `./test-xv6.py crash` | Bước CI; cần Python 3 và QEMU trên host |
 
 Thoát QEMU: `Ctrl+A` rồi `X`. Ctrl+C trong QEMU được gửi vào xv6 (demo), không thoát QEMU.
 
@@ -168,11 +168,9 @@ Thoát QEMU: `Ctrl+A` rồi `X`. Ctrl+C trong QEMU được gửi vào xv6 (demo
 
 ### 10.3. CI và minh chứng
 
-- CI hiện có (`.github/workflows/test.yml`, job linux): kiểm tra định dạng, build kernel và `fs.img`, `./test-xv6.py usertests`, `./test-xv6.py crash`. Job macOS chỉ build.
-- Test signal (`killtest`, `regtest`, `sigtest`, `pausetest`, demo, Ctrl+C) **chưa** chạy trong CI; đưa vào CI là việc tuần 5 (AU-01..03). Không ghi "CI xanh" như bằng chứng cho test signal khi chưa có bước đó.
+- CI hiện có (`.github/workflows/test.yml`, job linux): kiểm tra định dạng (`make fmt && git diff --exit-code`), build kernel và `fs.img`, `./test-xv6.py usertests`, `./test-xv6.py crash`, và `./test-xv6.py signals` (AU-01..03). Job macOS chỉ build.
 - CI lỗi do `apt-get` hoặc DNS (`Temporary failure resolving`) không phải lỗi code: cancel và re-run, không sửa code để "fix".
-- Giữ log khi test thất bại, phân biệt QEMU timeout, test timeout và kernel panic. Không dùng `retry until pass` rồi giấu lần thất bại.
-- Log hồi quy cuối tuần lưu trong `docs/logs/` (từ tuần 5).
+- Giữ log khi test thất bại để chẩn đoán (không commit `test-xv6.out`), phân biệt QEMU timeout, test timeout và kernel panic. Không dùng `retry until pass` rồi giấu lần thất bại.
 - Không để GitHub Actions hoặc script tự dùng token/secret ngoài phạm vi được cấp.
 
 ## 11. Demo và đánh giá
@@ -189,21 +187,19 @@ Ba demo bắt buộc, kịch bản và expected output trong `docs/test-plan.md`
 
 ## 12. Lịch và ưu tiên
 
-Khung thời gian và phân công theo **kế hoạch 8 tuần** của nhóm (`Project_26106_Ke_hoach_8_tuan`). Nội dung thật của mỗi tuần được quyết định bởi mục TODO của báo cáo tuần trước, sai lệch không quá 25%. Tiến độ thực tế từng tuần ghi trong báo cáo tuần (`docs/weekly/`).
+Khung thời gian và phân công theo **kế hoạch 8 tuần** của nhóm (`Project_26106_Ke_hoach_8_tuan`). Khi trễ tiến độ, ưu tiên core correctness, integration và test trước stretch. Tuần 8 không thêm tính năng lớn vào `main`.
 
-Khi trễ tiến độ, ưu tiên core correctness, integration và test trước stretch. Tuần 8 không thêm tính năng lớn vào `main`.
+## 13. Tài liệu và bàn giao
 
-## 13. Tài liệu, báo cáo tuần và bàn giao
+Thư mục `docs/` chỉ giữ các tài liệu thiết kế, phân tích kỹ thuật và kế hoạch kiểm thử cốt lõi:
 
-- `docs/signal-design.md`: API/ABI chung, cấu trúc dữ liệu, lifecycle, quyết định D1–D6. **Nguồn chân lý duy nhất.**
+- `docs/signal-design.md`: API/ABI chung, cấu trúc dữ liệu, lifecycle, quyết định D1–D6 và 10 quy tắc hệ thống. **Nguồn chân lý duy nhất.**
 - `docs/signal-delivery.md`, `docs/signal-core-locking.md`: thiết kế và phân tích khóa của Quyền.
 - `docs/signal-handler.md`: thiết kế của Hưng.
 - `docs/signal-mask-alarm.md`: thiết kế của Kiên, gồm Ctrl+C (§9).
 - `docs/test-plan.md`: ma trận kiểm thử theo mã, kịch bản 3 demo, trạng thái PASS/FAIL.
-- `docs/weekly/week-NN.md`: báo cáo tuần có bằng chứng (đang khôi phục; `week-03.md` bị xóa ở `ebcee8b`).
-- `docs/logs/`: log hồi quy cuối tuần, `CPUS=1` và `CPUS=4`.
 
-Không tạo tài liệu rỗng chỉ để đủ danh sách. Báo cáo tuần phân biệt: **đã nghiên cứu / đã thiết kế / đã code / đã build / đã test / đã merge**. Mục TODO của báo cáo tuần N là kế hoạch tuần N+1.
+Không tạo tài liệu rỗng chỉ để đủ danh sách. Khi báo cáo tiến độ, phân biệt rõ: **đã nghiên cứu / đã thiết kế / đã code / đã build / đã test / đã merge**.
 
 Kết thúc mỗi task, báo cáo:
 

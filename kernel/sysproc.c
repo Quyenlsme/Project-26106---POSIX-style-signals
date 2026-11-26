@@ -126,8 +126,8 @@ sys_sigaction(void)
   argaddr(1, &act_addr);
   argaddr(2, &oldact_addr);
 
-  // Kiểm tra số hiệu signal và không cho phép can thiệp SIGKILL
-  if (sig <= 0 || sig >= NSIG || sig == SIGKILL)
+  if (sig <= 0 || sig >= NSIG || sig == SIGKILL ||
+      !(SUPPORTED_MASK & (1U << sig)))
     return -1;
 
   // Nếu oldact != NULL, copy cấu hình cũ ra user

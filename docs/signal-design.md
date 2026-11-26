@@ -18,11 +18,11 @@ Dự án được phân rã thành 3 module kỹ thuật độc lập tương �
 │ PHẠM LÊ QUYỀN       │ TRẦN VIỆT HƯNG            │ NGUYỄN TRUNG KIÊN    │
 │ (Sending & Delivery)│ (Handler & Context)       │ (Masking & Timer)    │
 ├─────────────────────┼───────────────────────────┼──────────────────────┤
-│ • kkill(pid, sig)   │ • ksigaction()            │ • ksigprocmask()     │
+│ • kkill(pid, sig)   │ • sys_sigaction()         │ • sys_sigprocmask()  │
 │ • p->pending_signals│ • struct sigaction        │ • p->blocked_signals │
-│ • sig_send()        │ • struct sigframe         │ • kalarm()           │
+│ • sig_send()        │ • struct sigframe         │ • sys_alarm()        │
 │ • sig_deliver()     │ • sig_setup_frame()       │ • p->alarm_deadline  │
-│                     │ • ksigreturn()            │ • sig_alarm_check()  │
+│                     │ • sys_sigreturn()         │ • sig_alarm_check()  │
 │                     │ • Bảo toàn trapframe & a0 │ • sig_sanitize()     │
 │                     │                           │ • Bắt phím Ctrl+C    │
 └─────────────────────┴───────────────────────────┴──────────────────────┘
@@ -45,7 +45,7 @@ Tất cả các thành viên và module bắt buộc phải tuân thủ tuyệt 
 
 ### D2: Quản lý Mặt nạ Tín hiệu `sigprocmask()`
 - Chữ ký syscall: `int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);`.
-- Phía `user.h` sử dụng kiểu `uint` tương đương `sigset_t`.
+- Phía `user.h` sử dụng kiểu `unsigned int` tương đương `sigset_t`.
 - Tham số `set` và `oldset` truyền qua con trỏ; `oldset` có thể bằng 0 (NULL) nếu không cần đọc lại mask cũ.
 
 ### D3: Cấu trúc `sigaction` và `sigframe`
@@ -60,8 +60,8 @@ Tất cả các thành viên và module bắt buộc phải tuân thủ tuyệt 
   *(Không lưu `signum` và `ret_addr` trong struct vì chúng được nạp trực tiếp vào thanh ghi phần cứng `a0` và `ra` theo chuẩn RISC-V ABI)*.
 
 ### D4: Quy ước Đặt tên Hàm
-- Hàm bọc syscall cấp cao dùng tiền tố `k`: `kkill`, `ksigaction`, `ksigprocmask`, `ksigreturn`, `kalarm`.
-- Hàm tiện ích nội bộ trong kernel dùng tiền tố `sig_`: `sig_send`, `sig_deliver`, `sig_sanitize`, `sig_setup_frame`, `sig_alarm_check`.
+- Hàm xử lý syscall trong `kernel/sysproc.c` dùng tiền tố `sys_`: `sys_kill`, `sys_sigaction`, `sys_sigprocmask`, `sys_sigreturn`, `sys_alarm`, `sys_setfg`.
+- Hàm lõi chia sẻ trong kernel dùng tiền tố `k`/`console_` hoặc `sig_`: `kkill`, `console_setfg`, `sig_send`, `sig_deliver`, `sig_sanitize`, `sig_setup_frame`, `sig_alarm_check`, `sig_interrupted`, `sleep_prepare_intr`.
 - Tên các trường trong `struct proc` giữ nguyên định dạng thống nhất: `pending_signals`, `blocked_signals`, `sig_actions`, `alarm_deadline`.
 
 ### D5: Hành vi Mặc định (Default Action)
@@ -70,7 +70,7 @@ Tất cả các thành viên và module bắt buộc phải tuân thủ tuyệt 
 
 ### D6: Vòng đời Tiến trình & Quy tắc Phân nhóm Khóa
 - **Thao tác `kfork()`:** Tiến trình con **thừa kế** `blocked_signals` và bảng `sig_actions` từ cha; nhưng **không thừa kế** `pending_signals` (bằng 0) và `alarm_deadline` (bằng 0).
-- **Thao tác `kexec()`:** Tất cả các handler người dùng cài đặt bị reset về `SIG_DFL` (nhưng giữ nguyên `SIG_IGN`), giữ nguyên `blocked_signals` và `pending_signals`, hủy bộ hẹn giờ (`alarm_deadline = 0`).
+- **Thao tác `kexec()`:** Tất cả các handler người dùng cài đặt bị reset về `SIG_DFL` (nhưng giữ nguyên `SIG_IGN`), giữ nguyên `blocked_signals` và `pending_signals`, hủy bộ hẹn giờ (`alarm_deadline = 0` dưới `p->lock`). *(Điểm khác biệt có chủ đích so với POSIX: chuẩn POSIX giữ nguyên thời gian còn lại của `alarm` qua `exec()`, nhưng nhóm chọn hủy để tránh timer của chương trình cũ bắn nhầm `SIGALRM` vào image mới).*
 - **Phân nhóm Khóa (Locking Invariant):**
   - Nhóm cần `p->lock`: `pending_signals` và `alarm_deadline` (vì có thể bị ghi bởi CPU khác hoặc timer interrupt).
   - Nhóm dữ liệu riêng (Private to process): `blocked_signals` và `sig_actions[NSIG]` (chỉ tiến trình hiện hành tự thao tác, không cần giữ `p->lock`).
@@ -125,7 +125,7 @@ Kernel sử dụng biến toàn cục `ticks` làm thước đo thời gian chu�
 - Tốc độ trôi deadline hoàn toàn độc lập với việc tiến trình đang chạy hay đang ngủ, và độc lập 100% với số lượng CPU (`CPUS=1` hay `CPUS=4`).
 - So sánh hết hạn trong ngắt timer CPU 0 (`clockintr`):
   ```c
-  if ((int64)(now - p->alarm_deadline) >= 0) { ... }
+  if ((long)(now - p->alarm_deadline) >= 0) { ... }
   ```
   Phép trừ ép kiểu có dấu đảm bảo an toàn tuyệt đối ngay cả khi biến `ticks` bị tràn số (integer overflow).
 
@@ -133,7 +133,7 @@ Kernel sử dụng biến toàn cục `ticks` làm thước đo thời gian chu�
 Quy tắc toàn cục trong toàn bộ codebase:
 $$\text{tickslock} \longrightarrow p\text{->lock}$$
 
-Trong hàm `kalarm()`:
+Trong hàm `sys_alarm()`:
 1. Lấy `tickslock`, đọc biến `ticks`, nhả `tickslock`.
 2. Lấy `p->lock`, cập nhật `alarm_deadline`, nhả `p->lock`.
 Tuyệt đối không lồng hai khóa này vào nhau để triệt tiêu hoàn toàn nguy cơ deadlock.
@@ -142,20 +142,20 @@ Tuyệt đối không lồng hai khóa này vào nhau để triệt tiêu hoàn 
 
 ## 5. Danh mục System Call Mới trong Hệ thống
 
-| Tên Syscall | Số hiệu (`syscall.h`) | Prototype User (`user.h`) | Prototype Kernel (`defs.h`) |
+| Tên Syscall | Số hiệu (`syscall.h`) | Prototype User (`user.h`) | Hàm Kernel |
 |---|---|---|---|
-| `sigaction` | `23` | `int sigaction(int, const struct sigaction *, struct sigaction *);` | `int ksigaction(int, uint64, uint64);` |
-| `sigreturn` | `24` | `int sigreturn(void);` | `uint64 ksigreturn(void);` |
-| `sigprocmask` | `25` | `int sigprocmask(int, const unsigned int *, unsigned int *);` | `int ksigprocmask(int, uint64, uint64);` |
-| `alarm` | `26` | `int alarm(int);` | `int kalarm(int);` |
-| `setfg` | `27` | `int setfg(int);` | `void console_setfg(int);` |
-| `kill` | `6` (sửa đổi) | `int kill(int, int);` | `int kkill(int, int);` |
+| `sigaction` | `23` | `int sigaction(int, const struct sigaction *, struct sigaction *);` | `uint64 sys_sigaction(void);` (`kernel/sysproc.c`) |
+| `sigreturn` | `24` | `int sigreturn(void);` | `uint64 sys_sigreturn(void);` (`kernel/sysproc.c`) |
+| `sigprocmask` | `25` | `int sigprocmask(int, const unsigned int *, unsigned int *);` | `uint64 sys_sigprocmask(void);` (`kernel/sysproc.c`) |
+| `alarm` | `26` | `int alarm(int);` | `uint64 sys_alarm(void);` (`kernel/sysproc.c`) |
+| `setfg` | `27` | `int setfg(int);` | `void console_setfg(int);` (`kernel/console.c`) |
+| `kill` | `6` (sửa đổi) | `int kill(int, int);` | `int kkill(int, int);` (`kernel/proc.c`) |
 
 ---
 
 ## 6. Quy tắc Signal của Toàn bộ Hệ thống (System Signal Invariants)
 
-Nhóm thống nhất 8 bất biến kỹ thuật cốt lõi chi phối toàn bộ hành vi xử lý tín hiệu trên xv6-riscv, mỗi quy tắc đều được chứng minh bằng các bài kiểm thử thực tế:
+Nhóm thống nhất 10 bất biến kỹ thuật cốt lõi chi phối toàn bộ hành vi xử lý tín hiệu trên xv6-riscv, mỗi quy tắc đều được chứng minh bằng các bài kiểm thử thực tế:
 
 1. **Gộp tín hiệu lặp lại (Signal Coalescing):**
    - Trạng thái tín hiệu chờ được lưu dưới dạng bitmask `p->pending_signals`.
@@ -180,14 +180,14 @@ Nhóm thống nhất 8 bất biến kỹ thuật cốt lõi chi phối toàn b�
    - *Chứng minh:* `HD-06` (REG-05), `HD-08` (REG-30), `HD-14` (REG-37), `HD-15` (REG-38).
 
 5. **Ngắt System Call và trả về `-1`:**
-   - Khi tiến trình đang ngủ chờ trong các syscall có thể ngắt (`consoleread`, `piperead`, `pipewrite`, `kwait`, `sys_pause`), sự xuất hiện của tín hiệu có handler sẽ đánh thức tiến trình qua `sleep_prepare_intr()`, xóa `p->chan`, và syscall trả về `-1`.
+   - Khi tiến trình đang ngủ chờ trong các syscall có thể ngắt (`consoleread`, `piperead`, `kwait`, `sys_pause`), sự xuất hiện của tín hiệu có handler sẽ đánh thức tiến trình qua `sleep_prepare_intr()`, xóa `p->chan`, và syscall trả về `-1`.
    - Tín hiệu được giao ngay ở lần trở về user mode của chính syscall đó.
    - *Chứng minh:* `DL-10` (`killtest` T4, T6, T10), `PA-02`, `PA-05`.
 
 6. **Kế thừa trạng thái qua `fork()` và `exec()`:**
    - Qua `fork()`: tiến trình con thừa kế toàn bộ cấu hình `sig_actions[]` và `blocked_signals` của cha; `pending_signals` và `alarm_deadline` được reset về 0 (con không thừa kế timer của cha).
-   - Qua `exec()`: toàn bộ handler tùy biến được reset về `SIG_DFL` (vì mã hàm của handler cũ không còn trong không gian địa chỉ mới); `blocked_signals` được giữ nguyên.
-   - *Chứng minh:* `IN-03` (REG-25, REG-26, REG-27), `IN-04` (REG-28), `AL-07` (`sigtest` T2.6).
+   - Qua `exec()`: toàn bộ handler tùy biến được reset về `SIG_DFL` (giữ nguyên `SIG_IGN`), `blocked_signals` và `pending_signals` được giữ nguyên, và `alarm_deadline` được hủy về 0 dưới `p->lock`.
+   - *Chứng minh:* `IN-03` (REG-25, REG-26, REG-27), `IN-04` (REG-28), `AL-07` (`sigtest` T2.6), `AL-09` (`sigtest` T2.8).
 
 7. **Hành vi mặc định (`SIG_DFL`):**
    - Mọi tín hiệu được hỗ trợ (`SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGTERM`) nếu không đăng ký handler thì hành vi mặc định là kết thúc tiến trình với exit code `-1`.
@@ -195,7 +195,15 @@ Nhóm thống nhất 8 bất biến kỹ thuật cốt lõi chi phối toàn b�
 
 8. **Định tuyến Ngắt Thiết bị (Ctrl-C $\to$ `SIGINT`):**
    - Xử lý hoàn toàn trong ngữ cảnh ngắt UART (`consoleintr`), tuân thủ nghiêm ngặt thứ tự khóa `cons.lock -> p->lock`.
-   - Kernel chỉ chuyển tín hiệu cho tiến trình tiền cảnh (`fg_pid > 0`) do shell đăng ký qua syscall `setfg(pid)`.
+   - Kernel chỉ chuyển tín hiệu cho tiến trình tiền cảnh (`fg_pid > 0`) do shell đăng ký qua syscall `setfg(pid)` (tiến trình chạy nền `&` không bị ảnh hưởng).
    - Tuyệt đối không chạy user handler trong interrupt context; handler chỉ được thực thi khi tiến trình tiền cảnh quay về user mode.
    - *Chứng minh:* `DL-11`, `AU-03`.
+
+9. **Từ chối Tín hiệu Không được Hỗ trợ (`SUPPORTED_MASK`):**
+   - Cả `kkill()` và `sys_sigaction()` đều từ chối số hiệu ngoài `SUPPORTED_MASK` (trả về `-1`), không bật bit pending và không đánh thức nhầm tiến trình đang ngủ.
+   - *Chứng minh:* `DL-17` (`killtest` T16), `REG-12`.
+
+10. **Giới hạn User Stack và An toàn `sigframe`:**
+    - Mỗi tiến trình có 1 trang user stack (`USERSTACK = 1`). Khi dựng `sigframe` không đủ chỗ hoặc `sigreturn()` gặp địa chỉ frame không căn lề 16-byte / ngoài `[0, p->sz)`, kernel kết thúc tiến trình an toàn bằng `kexit(-1)` và không panic.
+    - *Chứng minh:* `HD-09` (REG-31), `HD-12` (REG-35).
 

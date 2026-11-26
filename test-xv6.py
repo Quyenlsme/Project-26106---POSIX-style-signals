@@ -138,6 +138,27 @@ class QEMU(object):
             if self.match(*regexps, exit=False):
                 return
 
+    # Theo dõi và khớp các dòng output mới phát sinh kể từ vị trí start.
+    def monitor_since(self, start, *regexps, forbid=None, timeout=30):
+        deadline = time.time() + timeout
+        while True:
+            time.sleep(0.3)
+            self.read()
+            end = self.output.rfind("\n") + 1
+            chunk = self.output[start:end] if end > start else ""
+            new_lines = chunk.splitlines()
+            if forbid:
+                for line in new_lines:
+                    if re.search(forbid, line):
+                        print("FORBIDDEN OUTPUT:", line)
+                        self.error(*regexps)
+            for line in new_lines:
+                if any(re.match(r, line) for r in regexps):
+                    print(line)
+                    return line
+            if time.time() > deadline:
+                self.error(*regexps)
+
 def crash_log(delay=2):
     q = QEMU(True)
     q.cmd("logstress f0 f1 f2 f3 f4 f5\n")
@@ -232,6 +253,7 @@ def test_usertests(test=""):
 
 def test_signals():
     print("=== TEST SIGNALS (AU-01, AU-02, AU-03) ===")
+    forbid_re = r'(\[FAIL\]|REG-\d+\s+FAIL|[1-9]\d*\s+FAIL|panic:)'
     q = QEMU(True)
     q.monitor(r'.*\$ ', timeout=30)
 
@@ -239,26 +261,30 @@ def test_signals():
     print("--- AU-01: Running unit tests (sigtest, pausetest, killtest, regtest) ---")
 
     print("Running sigtest...")
+    pos = len(q.output)
     q.cmd("sigtest\n")
-    q.monitor(r'.*ALL TESTS PASSED SUCCESSFULLY!', timeout=30)
+    q.monitor_since(pos, r'.*ALL TESTS PASSED SUCCESSFULLY!', forbid=forbid_re, timeout=60)
     time.sleep(0.5)
     print("sigtest OK")
 
     print("Running pausetest...")
+    pos = len(q.output)
     q.cmd("pausetest\n")
-    q.monitor(r'.*pausetest: ALL PASSED', timeout=30)
+    q.monitor_since(pos, r'.*pausetest: ALL PASSED', forbid=forbid_re, timeout=30)
     time.sleep(0.5)
     print("pausetest OK")
 
     print("Running killtest...")
+    pos = len(q.output)
     q.cmd("killtest\n")
-    q.monitor(r'.*killtest: ALL PASSED', timeout=60)
+    q.monitor_since(pos, r'.*killtest: ALL PASSED', forbid=forbid_re, timeout=60)
     time.sleep(0.5)
     print("killtest OK")
 
     print("Running regtest...")
+    pos = len(q.output)
     q.cmd("regtest\n")
-    q.monitor(r'.*TEST COMPLETED', timeout=60)
+    q.monitor_since(pos, r'.*TEST COMPLETED', forbid=forbid_re, timeout=60)
     time.sleep(0.5)
     print("regtest OK")
 
@@ -266,14 +292,16 @@ def test_signals():
     print("--- AU-02: Running demos (alarm_demo, mask_demo) ---")
 
     print("Running alarm_demo...")
+    pos = len(q.output)
     q.cmd("alarm_demo\n")
-    q.monitor(r'.*\[DEMO 2\] done: 5 alarms', timeout=30)
+    q.monitor_since(pos, r'.*\[DEMO 2\] done: 5 alarms', forbid=forbid_re, timeout=30)
     time.sleep(0.5)
     print("alarm_demo OK")
 
     print("Running mask_demo...")
+    pos = len(q.output)
     q.cmd("mask_demo\n")
-    q.monitor(r'.*\[DEMO 3\] after unblock: count=1', timeout=30)
+    q.monitor_since(pos, r'.*\[DEMO 3\] after unblock: count=1', forbid=forbid_re, timeout=30)
     time.sleep(0.5)
     print("mask_demo OK")
 
@@ -283,30 +311,75 @@ def test_signals():
     print("Testing Ctrl-C at shell prompt...")
     q.cmd(b'\x03')
     time.sleep(0.5)
+    q.read()
+    pos = len(q.output)
     q.cmd("echo OK_SHELL_CTRLC\n")
-    q.monitor(r'.*OK_SHELL_CTRLC', timeout=10)
+    q.monitor_since(pos, r'^OK_SHELL_CTRLC$', forbid=forbid_re, timeout=10)
     time.sleep(0.5)
     print("Ctrl-C at shell prompt OK")
 
     print("Testing ctrlc_demo with handler...")
+    q.read()
+    pos = len(q.output)
     q.cmd("ctrlc_demo\n")
-    q.monitor(r'.*Running\.\.\.', timeout=15)
+    q.monitor_since(pos, r'^(\$ )*Running\.\.\.$', forbid=forbid_re, timeout=15)
     time.sleep(0.2)
+    pos = len(q.output)
     q.cmd(b'\x03')
-    q.monitor(r'.*\[DEMO 1\] Caught Ctrl\+C \(SIGINT\)! Cleaning up and exiting\.\.\.', timeout=15)
+    q.monitor_since(pos, r'.*\[DEMO 1\] Caught Ctrl\+C \(SIGINT\)! Cleaning up and exiting\.\.\.', forbid=forbid_re, timeout=15)
     time.sleep(0.5)
     print("ctrlc_demo handler OK")
 
     print("Testing ctrlc_demo with SIG_DFL...")
+    q.read()
+    pos = len(q.output)
     q.cmd("ctrlc_demo dfl\n")
-    q.monitor(r'.*Running\.\.\.', timeout=15)
+    q.monitor_since(pos, r'^(\$ )*Running\.\.\.$', forbid=forbid_re, timeout=15)
     time.sleep(0.2)
     q.cmd(b'\x03')
     time.sleep(0.5)
+    q.read()
+    pos = len(q.output)
     q.cmd("echo OK_AFTER_DFL\n")
-    q.monitor(r'.*OK_AFTER_DFL', timeout=10)
+    q.monitor_since(pos, r'^OK_AFTER_DFL$', forbid=forbid_re, timeout=10)
     time.sleep(0.5)
     print("ctrlc_demo SIG_DFL OK")
+
+    print("Testing background process unaffected by Ctrl-C...")
+    q.read()
+    q.cmd("ctrlc_demo dfl > bg.out &\n")
+    time.sleep(1.5)
+    q.read()
+    pos = len(q.output)
+    q.cmd("cat bg.out\n")
+    pid_line = q.monitor_since(pos, r'^\[DEMO 1\] PID \d+ running', forbid=forbid_re, timeout=15)
+    bg_pid = re.search(r'PID (\d+)', pid_line).group(1)
+    q.monitor_since(pos, r'^Running\.\.\.$', forbid=forbid_re, timeout=15)
+    time.sleep(0.3)
+    q.read()
+    before_cnt = len(re.findall(r'^Running\.\.\.$', q.output[pos:], re.MULTILINE))
+    q.cmd(b'\x03')
+    time.sleep(1.5)
+    q.read()
+    pos = len(q.output)
+    q.cmd("cat bg.out\n")
+    q.monitor_since(pos, r'^\[DEMO 1\] PID ' + bg_pid + r' running', forbid=forbid_re, timeout=15)
+    time.sleep(0.3)
+    q.read()
+    after_cnt = len(re.findall(r'^Running\.\.\.$', q.output[pos:], re.MULTILINE))
+    if after_cnt <= before_cnt:
+        print(f"FAIL: background process stopped after Ctrl-C (before={before_cnt}, after={after_cnt})")
+        q.error(r'background Running count increase')
+    q.cmd(f"kill {bg_pid}\n")
+    time.sleep(0.5)
+    q.cmd("rm bg.out\n")
+    time.sleep(0.3)
+    q.read()
+    pos = len(q.output)
+    q.cmd("echo OK_AFTER_BG\n")
+    q.monitor_since(pos, r'^OK_AFTER_BG$', forbid=forbid_re, timeout=10)
+    time.sleep(0.5)
+    print(f"background process Ctrl-C isolation OK (before={before_cnt}, after={after_cnt})")
 
     q.stop()
     print("=== ALL SIGNAL TESTS PASSED (AU-01, AU-02, AU-03) ===")

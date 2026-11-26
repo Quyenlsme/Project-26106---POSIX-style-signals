@@ -32,7 +32,7 @@ Sau khi handler kết thúc (bằng lệnh `ret` trong assembly), CPU sẽ nhả
 
 ## 2. Thiết kế Khung Ngăn xếp Tín hiệu: `struct sigframe`
 
-### 2.1. Cấu trúc `struct sigframe` (`kernel/signal.h`)
+### 2.1. Cấu trúc `struct sigframe` (`kernel/proc.h`)
 Khung dữ liệu này được kernel trực tiếp ghi vào vùng nhớ user stack của tiến trình:
 
 ```c
@@ -86,12 +86,13 @@ struct sigaction {
 };
 ```
 
-### 3.2. Thuật toán Xử lý trong Kernel (`ksigaction`)
+### 3.2. Thuật toán Xử lý trong Kernel (`sys_sigaction`)
 ```text
-ksigaction(sig, act_user_addr, oldact_user_addr):
+sys_sigaction():
     1. Kiểm tra tính hợp lệ:
        - sig <= 0 || sig >= NSIG: trả về -1 (số hiệu không tồn tại).
        - sig == SIGKILL: trả về -1 (chuẩn POSIX nghiêm cấm thay đổi handler của SIGKILL).
+       - !(SUPPORTED_MASK & (1U << sig)): trả về -1 (từ chối signal ngoài tập hỗ trợ, nhất quán với kkill).
 
     2. Đọc cấu hình cũ ra user (nếu oldact_user_addr != 0):
        - Sao chép p->sig_actions[sig] ra vùng nhớ user qua copyout().
@@ -126,8 +127,8 @@ int sig_setup_frame(int sig, struct sigaction *act) {
     uint64 new_sp = (p->trapframe->sp - sizeof(struct sigframe)) & ~0xFULL;
     
     // Bước 2: Kiểm tra an toàn bộ nhớ (Boundary Check)
-    // Con trỏ stack mới phải nằm trong không gian địa chỉ hợp lệ của tiến trình: [0, p->sz)
-    if (new_sp >= p->sz || new_sp < sizeof(struct sigframe))
+    // Tránh tràn số học (new_sp < sp cũ) và đảm bảo frame nằm gọn trong [0, p->sz)
+    if (new_sp >= p->trapframe->sp || new_sp + sizeof(sf) > p->sz)
         return -1;
         
     // Bước 3: Đóng gói ngữ cảnh cũ vào sigframe
@@ -135,7 +136,7 @@ int sig_setup_frame(int sig, struct sigaction *act) {
     sf.saved_mask = p->blocked_signals;
     
     // Bước 4: Sao chép khung sigframe lên User Stack
-    if (copyout(p->pagetable, new_sp, (char*)&sf, sizeof(sf)) < 0)
+    if (copyout(p->pagetable, p->sz, new_sp, (char *)&sf, sizeof(sf)) < 0)
         return -1;
         
     // Bước 5: Cập nhật mặt nạ tín hiệu mới khi vào handler:
@@ -174,7 +175,7 @@ uint64 sys_sigreturn(void) {
     }
     
     // Bước 2: Đọc dữ liệu sigframe từ user stack vào kernel
-    if (copyin(p->pagetable, (char*)&sf, frame_addr, sizeof(sf)) < 0) {
+    if (copyin(p->pagetable, p->sz, (char *)&sf, frame_addr, sizeof(sf)) < 0) {
         kexit(-1);
     }
     
@@ -334,21 +335,23 @@ sigreturn() -> Khôi phục Main Program
 
 ## 7. Ma trận Kiểm thử Module Handler (HD-01 đến HD-16)
 
-| Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi |
-|---|---|---|---|
-| **HD-01** | Đăng ký Handler hợp lệ | Gọi `sigaction` cài đặt handler cho `SIGUSR1`, đọc `oldact` | Đăng ký thành công, `oldact` trả về cấu hình trước đó |
-| **HD-02** | Từ chối can thiệp SIGKILL | Gọi `sigaction(SIGKILL, &act, 0)` | Trả về `-1`, handler của `SIGKILL` bất biến |
-| **HD-03** | Bảo toàn 100% thanh ghi CPU | Nạp các số nguyên ngẫu nhiên vào `s0-s11`, `a1-a7`, nhận signal | Sau khi handler kết thúc, tất cả thanh ghi giữ nguyên giá trị |
-| **HD-04** | Bảo toàn thanh ghi `a0` | Chương trình chính đang giữ giá trị `a0 = 0x1234` | Sau `sigreturn()`, `a0` vẫn giữ nguyên `0x1234` |
-| **HD-05** | Khôi phục Program Counter | Đang thực hiện vòng lặp tính toán thì bị ngắt | Handler kết thúc, vòng lặp chạy tiếp đúng vị trí lệnh bị dừng |
-| **HD-06** | Khôi phục Signal Mask | Trước handler mask = M1; trong handler mask = M2 | Sau `sigreturn()`, mask được khôi phục chính xác về M1 |
-| **HD-07** | Nested Handlers 2 tầng | Handler `SIGUSR1` nhận tiếp `SIGUSR2` | Handler 2 chạy và unwind trước, sau đó Handler 1 hoàn tất |
-| **HD-08** | Chống đệ quy lặp cùng signal | Trong handler `SIGUSR1`, gửi lại chính `SIGUSR1` | Signal mới bị pending, không bị lồng đệ quy tràn stack |
-| **HD-09** | Xử lý Bad Stack Frame | Cố tình gọi `sigreturn()` với con trỏ stack không căn lề hoặc trỏ ra ngoài bộ nhớ | Kernel gọi `kexit(-1)` diệt tiến trình an toàn, không panic |
-| **HD-10** | Căn lề Stack 16-byte | Đọc giá trị thanh ghi `sp` ngay dòng đầu tiên của hàm handler | `sp % 16 == 0` tuyệt đối |
-| **HD-11** | Nested Handlers 3 tầng | Handler `SIGUSR1` gửi tiếp `SIGUSR2`; Handler `SIGUSR2` gửi tiếp `SIGALRM` | Ba handler được thực thi đúng thứ tự lồng nhau; unwind theo LIFO; signal mask được khôi phục chính xác |
-| **HD-12** | User Stack không đủ chỗ chứa Signal Frame | Cố tình đặt `sp` tại vị trí không đủ không gian để kernel ghi `sigframe` | Tiến trình con kết thúc với trạng thái `-1`; kernel không panic |
-| **HD-13** | Burst / Multiple Pending Signals | Chặn `SIGUSR1`, `SIGUSR2`, `SIGALRM`, gửi theo thứ tự ngược rồi bỏ chặn | Cả ba signal được xử lý đúng một lần theo thứ tự số hiệu tăng dần; các thanh ghi `s1-s11` được bảo toàn |
-| **HD-14** | Sa_mask trì hoãn signal khác | Đăng ký handler `SIGUSR1` với `sa_mask` chứa `SIGUSR2`; gửi `SIGUSR2` trong khi handler `SIGUSR1` đang thực thi | `SIGUSR2` bị trì hoãn cho đến khi handler `SIGUSR1` kết thúc; sau đó handler `SIGUSR2` được thực thi |
-| **HD-15** | Kiểm tra mask trong handler và khôi phục mask ban đầu | Thiết lập signal mask ban đầu, đăng ký handler và kiểm tra mask trong quá trình handler thực thi | Mask trong handler đúng theo cấu hình `sa_mask` và signal tự động bị chặn; sau `sigreturn`, mask ban đầu được khôi phục chính xác |
-| **HD-16** | Re-arm SIGALRM và bảo toàn trạng thái CPU | Đăng ký handler `SIGALRM`, đặt alarm ban đầu; handler tự gọi lại `alarm()` cho đến đủ 5 lần; thực hiện tính toán và kiểm tra `s1-s11` | Handler được gọi đủ 5 lần; kết quả tính toán chính xác; các thanh ghi `s1-s11` được bảo toàn sau các lần xử lý signal |
+Toàn bộ ca kiểm thử nằm trong `user/regtest.c` (chạy: `$ regtest`, đã PASS trên `CPUS=1` và `CPUS=4`).
+
+| Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi | Ánh xạ `regtest` |
+|---|---|---|---|---|
+| **HD-01** | Đăng ký Handler hợp lệ | Gọi `sigaction` cài đặt handler cho `SIGUSR1`, đọc `oldact` | Đăng ký thành công, `oldact` trả về cấu hình trước đó | REG-01, REG-15, REG-22 |
+| **HD-02** | Từ chối can thiệp SIGKILL & signal không hỗ trợ | Gọi `sigaction(SIGKILL, ...)`, `sigaction(5, ...)`, `sigaction(31, ...)` | Trả về `-1`, handler của `SIGKILL` bất biến | REG-11, REG-12 |
+| **HD-03** | Bảo toàn 100% thanh ghi CPU | Nạp các số nguyên ngẫu nhiên vào `s0-s11`, `t0-t6`, `a1-a7`, nhận signal | Sau khi handler kết thúc, tất cả thanh ghi giữ nguyên giá trị | REG-02, REG-33 |
+| **HD-04** | Bảo toàn thanh ghi `a0` | Chương trình chính đang giữ giá trị `a0 = 0x12345678` | Sau `sigreturn()`, `a0` vẫn giữ nguyên | REG-29 |
+| **HD-05** | Khôi phục Program Counter | Đang thực hiện vòng lặp tính toán thì bị ngắt | Handler kết thúc, vòng lặp chạy tiếp đúng vị trí lệnh bị dừng | REG-02, REG-29, REG-33 |
+| **HD-06** | Khôi phục Signal Mask | Trước handler mask = M1; trong handler mask = M2 | Sau `sigreturn()`, mask được khôi phục chính xác về M1 | REG-05 |
+| **HD-07** | Nested Handlers 2 tầng | Handler `SIGUSR1` nhận tiếp `SIGUSR2` | Handler 2 chạy và unwind trước, sau đó Handler 1 hoàn tất | REG-06 |
+| **HD-08** | Chống đệ quy lặp cùng signal | Trong handler `SIGUSR1`, gửi lại chính `SIGUSR1` | Signal mới bị pending, không bị lồng đệ quy tràn stack | REG-30 |
+| **HD-09** | Xử lý Bad Stack Frame | Cố tình gọi `sigreturn()` với con trỏ stack không căn lề hoặc trỏ ra ngoài bộ nhớ | Kernel gọi `kexit(-1)` diệt tiến trình an toàn, không panic | REG-31 |
+| **HD-10** | Căn lề Stack 16-byte | Đọc giá trị thanh ghi `sp` ngay dòng đầu tiên của hàm handler | `sp % 16 == 0` tuyệt đối | REG-32 |
+| **HD-11** | Nested Handlers 3 tầng | Handler `SIGUSR1` gửi tiếp `SIGUSR2`; Handler `SIGUSR2` gửi tiếp `SIGALRM` | Ba handler được thực thi đúng thứ tự lồng nhau; unwind theo LIFO; signal mask được khôi phục chính xác | REG-34 |
+| **HD-12** | User Stack không đủ chỗ chứa Signal Frame | Cố tình đặt `sp` tại vị trí không đủ không gian để kernel ghi `sigframe` | Tiến trình con kết thúc với trạng thái `-1`; kernel không panic | REG-35 |
+| **HD-13** | Burst / Multiple Pending Signals | Chặn `SIGUSR1`, `SIGUSR2`, `SIGALRM`, gửi theo thứ tự ngược rồi bỏ chặn | Cả ba signal được xử lý đúng một lần theo thứ tự số hiệu tăng dần; các thanh ghi `s1-s11` được bảo toàn | REG-36 |
+| **HD-14** | Sa_mask trì hoãn signal khác | Đăng ký handler `SIGUSR1` với `sa_mask` chứa `SIGUSR2`; gửi `SIGUSR2` trong khi handler `SIGUSR1` đang thực thi | `SIGUSR2` bị trì hoãn cho đến khi handler `SIGUSR1` kết thúc; sau đó handler `SIGUSR2` được thực thi | REG-37 |
+| **HD-15** | Kiểm tra mask trong handler và khôi phục mask ban đầu | Thiết lập signal mask ban đầu, đăng ký handler và kiểm tra mask trong quá trình handler thực thi | Mask trong handler đúng theo cấu hình `sa_mask` và signal tự động bị chặn; sau `sigreturn`, mask ban đầu được khôi phục chính xác | REG-38 |
+| **HD-16** | Re-arm SIGALRM và bảo toàn trạng thái CPU | Đăng ký handler `SIGALRM`, đặt alarm ban đầu; handler tự gọi lại `alarm()` cho đến đủ 5 lần; thực hiện tính toán và kiểm tra `s1-s11` | Handler được gọi đủ 5 lần; kết quả tính toán chính xác; các thanh ghi `s1-s11` được bảo toàn sau các lần xử lý signal | REG-39 |

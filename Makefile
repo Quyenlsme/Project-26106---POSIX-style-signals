@@ -168,7 +168,7 @@ clean:
 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
 	*/*.o */*.d */*.asm */*.sym \
 	$K/kernel fs.img \
-	mkfs/mkfs .gdbinit \
+	mkfs/mkfs .gdbinit test-xv6.out \
         $U/usys.S \
 	$(UPROGS)
 

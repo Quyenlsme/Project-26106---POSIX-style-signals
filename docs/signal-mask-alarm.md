@@ -52,26 +52,23 @@ Mọi thao tác thay đổi `blocked_signals` từ user-space đều phải đi 
   - `SIG_UNBLOCK` (1): Gỡ bỏ các tín hiệu khỏi danh sách chặn: $\text{blocked} \gets \text{blocked} \ \& \ \sim\text{set}$.
   - `SIG_SETMASK` (2): Ghi đè toàn bộ danh sách chặn bằng mặt nạ mới: $\text{blocked} \gets \text{set}$.
 
-### 3.2. Thuật toán Xử lý trong Kernel (`ksigprocmask`)
+### 3.2. Thuật toán Xử lý trong Kernel (`sys_sigprocmask`)
 Để đảm bảo tính toàn vẹn (Atomicity) và an toàn bộ nhớ:
 ```text
-ksigprocmask(how, set_user_addr, oldset_user_addr):
+sys_sigprocmask():
     p = myproc()
+    Đọc tham số how, set_addr, oldset_addr.
 
-    1. Kiểm tra tham số:
-       - Nếu set_user_addr != 0:
-             Nếu how không thuộc {SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK}:
-                 trả về -1.
+    1. Kiểm tra tham số và nạp set từ user (nếu set_addr != 0):
+       - Nếu how không thuộc {SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK}: trả về -1.
+       - Sao chép dữ liệu từ user vào in_set qua copyin(); nếu lỗi trả về -1.
 
-    2. Lưu mặt nạ cũ ra User (nếu oldset_user_addr != 0):
+    2. Lưu mặt nạ cũ ra user (nếu oldset_addr != 0):
        - Đọc old_mask = p->blocked_signals;
-       - Sao chép ra user qua copyout(..., oldset_user_addr, &old_mask, ...);
-       - Nếu copyout thất bại: trả về -1 NGAY LẬP TỨC.
-       (Quy tắc an toàn: Không thay đổi trạng thái nếu việc sao lưu thất bại).
+       - Sao chép ra user qua copyout(p->pagetable, p->sz, oldset_addr, &old_mask, ...);
+       - Nếu copyout thất bại: trả về -1 NGAY LẬP TỨC (không thay đổi mask).
 
-    3. Cập nhật mặt nạ mới (nếu set_user_addr != 0):
-       - Sao chép dữ liệu từ user vào biến tạm in_set qua copyin().
-       - Nếu copyin thất bại: trả về -1.
+    3. Cập nhật mặt nạ mới (nếu set_addr != 0):
        - Chuẩn hóa: sanitized_set = sig_sanitize(in_set);
        - Cập nhật vào trường private p->blocked_signals:
            + Nếu how == SIG_BLOCK:   p->blocked_signals = sig_sanitize(p->blocked_signals | sanitized_set);
@@ -104,15 +101,10 @@ void sig_alarm_check(uint64 now) {
     struct proc *p;
     for (p = proc; p < &proc[NPROC]; p++) {
         acquire(&p->lock);
-        // Chỉ xét các tiến trình đang hoạt động và có cài đặt alarm
         if (p->state != UNUSED && p->state != ZOMBIE && p->alarm_deadline != 0) {
-            // So sánh kiểu có dấu để an toàn tuyệt đối khi biến ticks bị tràn số (overflow)
-            if ((int64)(now - p->alarm_deadline) >= 0) {
-                p->alarm_deadline = 0;                  // Cơ chế One-shot: tự động hủy deadline
-                p->pending_signals |= (1U << SIGALRM); // Bật cờ báo tín hiệu SIGALRM đang chờ
-                if (p->state == SLEEPING) {
-                    p->state = RUNNABLE;                // Đánh thức nếu tiến trình đang ngủ chờ alarm
-                }
+            if ((long)(now - p->alarm_deadline) >= 0) {
+                p->alarm_deadline = 0; // One-shot: tự động hủy deadline
+                sig_send(p, SIGALRM);
             }
         }
         release(&p->lock);
@@ -123,7 +115,7 @@ void sig_alarm_check(uint64 now) {
 ### 4.3. Quy tắc Thứ tự Khóa Tuyệt đối (Lock Ordering Invariant)
 Trong kernel xv6, quy tắc thứ tự khóa giữa timer và tiến trình là:
 $$\text{tickslock} \longrightarrow p\text{->lock}$$
-Trong hàm `kalarm()`, để đọc biến `ticks` và gán `alarm_deadline`, kernel **tuyệt đối không lồng hai khóa này vào nhau**:
+Trong hàm `sys_alarm()`, để đọc biến `ticks` và gán `alarm_deadline`, kernel **tuyệt đối không lồng hai khóa này vào nhau**:
 ```c
 // Bước 1: Đọc ticks dưới tickslock rồi nhả ngay
 acquire(&tickslock);
@@ -151,7 +143,7 @@ Chuẩn POSIX quy định `alarm()` là cơ chế kích hoạt một lần duy n
 |---|---|---|---|
 | **`allocproc()`** | Khởi tạo `= 0` | Khởi tạo `= 0` | Tiến trình mới tạo không bị chặn tín hiệu nào và không có timer. |
 | **`kfork()`** | **Thừa kế** từ cha | **Không thừa kế** (`= 0`) | Tiến trình con nhận cùng chính sách bảo vệ tín hiệu của cha; nhưng timer hẹn giờ là riêng biệt cho từng tiến trình. |
-| **`kexec()`** | **Giữ nguyên** | **Hủy bỏ** (`= 0`) | Binary mới kế thừa môi trường chặn tín hiệu của tiến trình cũ; nhưng timer của chương trình cũ bị hủy. |
+| **`kexec()`** | **Giữ nguyên** | **Hủy bỏ** (`= 0`, giữ `p->lock`) | Binary mới kế thừa môi trường chặn tín hiệu của tiến trình cũ; timer cũ bị hủy dưới `p->lock` (khác POSIX có chủ đích theo D6 để tránh timer cũ bắn nhầm vào image mới). |
 | **`freeproc()`** | Xóa sạch `= 0` | Xóa sạch `= 0` | Giải phóng tài nguyên an toàn khi tiến trình kết thúc. |
 
 ---
@@ -206,7 +198,7 @@ sequenceDiagram
 | **MK-06** | Tham số `how` không hợp lệ | Truyền `how = 99` | Syscall trả về `-1`, mask không bị biến đổi |
 | **MK-07** | Con trỏ `set` hoặc `oldset` rác | Truyền địa chỉ bộ nhớ không hợp lệ | Syscall phát hiện lỗi copy và trả về `-1` |
 
-### Bảng Kiểm thử Hẹn giờ Alarm (`AL-01` đến `AL-07`)
+### Bảng Kiểm thử Hẹn giờ Alarm (`AL-01` đến `AL-09`)
 | Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi |
 |---|---|---|---|
 | **AL-01** | Hẹn giờ cơ bản `alarm(n)` | Đặt handler `SIGALRM`, gọi `alarm(5)` | Handler được gọi sau khoảng 5 ticks |
@@ -216,6 +208,8 @@ sequenceDiagram
 | **AL-05** | Kết hợp `alarm` và `sigprocmask` | Block `SIGALRM`, gọi `alarm(3)`, chờ 5 ticks | Alarm hết hạn, `SIGALRM` giữ pending; khi unblock thì handler chạy |
 | **AL-06** | Độc lập đa CPU với Alarm | Chạy test alarm trên `CPUS=1` và `CPUS=4` | Tốc độ trôi deadline không bị phụ thuộc số lượng CPU |
 | **AL-07** | Fork không thừa kế Alarm | Cha gọi `alarm(50)`, gọi `fork()` | Tiến trình con có `alarm_deadline == 0`, không bị kích hoạt nhầm |
+| **AL-08** | Độ chính xác tick của `alarm(n)` | Đo `uptime()` với `n` ∈ `{1, 5, 10, 50}` ở cả chạy bận và `pause()` | Độ trễ `dt` nằm trong `[n, n+3]` ticks, không bao giờ nổ sớm |
+| **AL-09** | Exec hủy Alarm đang chờ (khác POSIX theo D6) | Con đặt `alarm(3)` rồi gọi `exec()` | Sau `exec()`, `alarm(0) == 0` và tiến trình không bị `SIGALRM` kết thúc |
 
 ---
 
@@ -230,7 +224,8 @@ Trong baseline xv6-riscv hiện hành, syscall đưa tiến trình vào trạng 
       release(&tickslock);
       return -1;
     }
-    sleep_prepare(&ticks);
+    if (sleep_prepare_intr(&ticks))
+      continue;
     release(&tickslock);
     sleep();
     acquire(&tickslock);
@@ -268,34 +263,37 @@ Bàn phím -> UART Phần cứng -> Ngắt UART -> plic_claim() -> uartintr() ->
 ```
 Trong `kernel/console.c`, hàm `consoleintr(c)` tiếp nhận từng ký tự:
 - Đã hỗ trợ: `Ctrl-P` (`procdump`), `Ctrl-U` (xóa dòng), `Ctrl-H` / Delete (xóa ký tự), `Ctrl-D` (EOF).
-- **Đã bổ sung ở Tuần 4 (`case C('C')`):** Khi nhận `0x03`, kernel in `^C\n`, xóa phần ký tự chưa nhấn Enter (`cons.e = cons.w`), không đẩy `0x03` vào `cons.buf`, và nếu `fg_pid > 0` thì gọi `kkill(fg_pid, SIGINT)`.
+- **Đã bổ sung (`case C('C')`):** Khi nhận `0x03`, kernel in `^C\n`, xóa phần ký tự chưa nhấn Enter (`cons.e = cons.w`), không đẩy `0x03` vào `cons.buf`; nếu `fg_pid > 0` thì gọi `kkill(fg_pid, SIGINT)`, còn nếu `fg_pid == 0` thì in lại dấu nhắc `$ `.
 
 ### 9.2. Phân tích Các Phương án Xác định Foreground Process
 | Phương án | Cơ chế hoạt động | Ưu điểm | Nhược điểm | Đánh giá |
 |---|---|---|---|---|
-| **PA-1 (Đề xuất)** | Thêm biến toàn cục `fg_pid` trong kernel (bảo vệ bởi `cons.lock`) + syscall `setfg(int pid)`. Shell `sh.c` gọi `setfg(child_pid)` trước `wait(0)` và `setfg(0)` sau khi lệnh xong. | Đơn giản, an toàn, can thiệp tối thiểu vào xv6 kernel. | Chỉ ngắt được 1 tiến trình con trực tiếp, chưa hỗ trợ chuỗi pipeline `a \| b`. | **Khả thi nhất cho đồ án** |
+| **PA-1 (Đề xuất)** | Thêm biến toàn cục `fg_pid` trong kernel (bảo vệ bởi `cons.lock`) + syscall `setfg(int pid)`. Shell `sh.c` gọi `setfg()` cả ở con (`getpid()`) và cha (`pid`) trước `wait(0)`, rồi `setfg(0)` sau khi lệnh xong. | Đơn giản, an toàn, can thiệp tối thiểu vào xv6 kernel. | Chỉ ngắt được 1 tiến trình con trực tiếp, chưa hỗ trợ chuỗi pipeline `a \| b`. | **Khả thi nhất cho đồ án** |
 | **PA-2** | Bổ sung khái niệm Process Group (`p->pgid`) + syscall `setpgid()`. `Ctrl-C` gửi `SIGINT` cho toàn bộ nhóm tiến trình tiền cảnh. | Chuẩn POSIX, hỗ trợ ngắt toàn bộ pipeline. | Phức tạp, phải sửa `allocproc`, `kfork`, vòng đời tiến trình. | Để dành cho giai đoạn Stretch |
 | **PA-3** | Quét toàn bộ bảng `proc[]`, gửi `SIGINT` cho mọi tiến trình `pid > 2`. | Không cần sửa `sh.c`. | Giết nhầm cả tiến trình daemon/background (`&`). | Không dùng |
 
-### 9.3. Hiện thực Phương án 1 (PA-1) trên nhánh `feature/ctrlc-sigint`
+### 9.3. Hiện thực Phương án 1 (PA-1)
 1. **Trong `kernel/console.c` và `kernel/defs.h`:**
    - Thêm `static int fg_pid = 0;` (bảo vệ bởi `cons.lock`) và `void console_setfg(int pid)`.
-   - Thêm nhánh `case C('C'):` trong `consoleintr()`: in `^C\n`, đặt `cons.e = cons.w` để loại bỏ ký tự đang gõ dở, và gọi `kkill(fg_pid, SIGINT)` nếu `fg_pid > 0`.
+   - Nhánh `case C('C'):` trong `consoleintr()`: in `^C\n`, đặt `cons.e = cons.w` để loại bỏ ký tự đang gõ dở; nếu `fg_pid > 0` thì gọi `kkill(fg_pid, SIGINT)`, ngược lại in lại dấu nhắc `$ `.
 2. **Syscall `setfg(int pid)` (`SYS_setfg = 27`):**
    - Khai báo trong `kernel/syscall.h`, `kernel/syscall.c`, `kernel/sysproc.c` (`sys_setfg` kiểm tra `pid < 0` trả về `-1`), `user/user.h` và `user/usys.pl`.
 3. **Trong `user/sh.c`:**
    ```c
    int pid = fork1();
-   if (pid == 0)
+   if (pid == 0) {
+     setfg(getpid());
      runcmd(parsecmd(cmd));
+   }
    setfg(pid);
    wait(0);
    setfg(0);
    ```
+   - Cả con (`setfg(getpid())`) và cha (`setfg(pid)`) cùng đặt `fg_pid` giúp đóng khe thời gian ngay sau `fork1()`.
    - Lệnh chạy nền (`&`) không bị `Ctrl-C` ngắt nhầm vì child trung gian thoát ngay sau khi fork grandchild.
    - Giới hạn đã biết theo PA-1: chưa hỗ trợ ngắt trực tiếp các tiến trình cháu trong chuỗi pipeline `a | b`.
 4. **Quy tắc An toàn và Locking Invariant:**
    - `consoleintr` thực thi trong ngữ cảnh ngắt thiết bị. Hàm `kkill()` chỉ thao tác trên spinlock (`p->lock`), không gọi `sleep()` hay yield CPU, hoàn toàn an toàn khi gọi từ ngắt.
    - Handler của user **tuyệt đối không chạy trong interrupt context**: `kkill()` chỉ bật bit pending và đánh thức tiến trình. Handler sẽ được thực thi khi tiến trình tiền cảnh được lập lịch và quay về user qua `prepare_return()`.
    - Thứ tự khóa tuân thủ: `cons.lock -> p->lock` (nhất quán với `consoleread`).
-5. **Trạng thái kiểm thử (`DL-11`):** Đã hoàn tất mã nguồn (`user/ctrlc_demo.c`, `Makefile`), chờ chạy xác minh trên QEMU (`CPUS=1` và `CPUS=4`).
+5. **Trạng thái kiểm thử (`DL-11`, `AU-03`):** **PASS** trên cả `CPUS=1` và `CPUS=4` cho cả 4 tình huống (tại dấu nhắc shell, `ctrlc_demo` có handler, `ctrlc_demo dfl`, và cô lập tiến trình nền `&`), đã tích hợp kiểm thử tự động trong `./test-xv6.py signals` và GitHub Actions CI.

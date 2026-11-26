@@ -10,4 +10,6 @@ _*
 /user/usys.S
 .gdbinit
 TAGS
+test-xv6.out
+__pycache__/
 

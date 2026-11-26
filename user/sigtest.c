@@ -16,8 +16,15 @@ void test_mask_pending_delivery(void);
 int
 main(int argc, char *argv[])
 {
+  if (argc == 2 && strcmp(argv[1], "exec_alarm_check") == 0) {
+    if (alarm(0) != 0)
+      exit(1);
+    pause(8);
+    exit(0);
+  }
+
   printf("\n========================================\n");
-  printf("  SIGNAL SYSTEM INTEGRATION TEST (WEEK 3)\n");
+  printf("  SIGNAL SYSTEM INTEGRATION TEST\n");
   printf("========================================\n\n");
 
   test_sigprocmask();
@@ -34,12 +41,22 @@ main(int argc, char *argv[])
 }
 
 int handler_called = 0;
+static volatile int alrm_fired = 0;
+static volatile int alrm_tick = 0;
 
 void
 custom_handler(int sig)
 {
   handler_called++;
   printf("  -> [Handler] Received signal %d (count=%d)\n", sig, handler_called);
+}
+
+// Ghi nhận thời điểm handler SIGALRM thực thi để đo độ chính xác tick.
+static void
+alarm_accuracy_handler(int sig)
+{
+  alrm_tick = uptime();
+  alrm_fired = 1;
 }
 
 void
@@ -98,6 +115,23 @@ test_sigprocmask(void)
     exit(1);
   }
   printf("  [PASS] Invalid how=99 rejected with -1\n");
+
+  unsigned int before_bad = 0;
+  sigprocmask(SIG_BLOCK, 0, &before_bad);
+  if (sigprocmask(SIG_BLOCK, (unsigned int *)0xdeadbeef, 0) != -1) {
+    printf("  [FAIL] MK-07: invalid set pointer accepted\n");
+    exit(1);
+  }
+  if (sigprocmask(SIG_BLOCK, &block_set, (unsigned int *)0xdeadbeef) != -1) {
+    printf("  [FAIL] MK-07: invalid oldset pointer accepted\n");
+    exit(1);
+  }
+  sigprocmask(SIG_BLOCK, 0, &cur_mask);
+  if (cur_mask != before_bad) {
+    printf("  [FAIL] MK-07: mask mutated after failed copyout\n");
+    exit(1);
+  }
+  printf("  [PASS] MK-07: invalid user pointers rejected\n");
 
   printf("  => sigprocmask tests: ALL PASSED\n\n");
 }
@@ -174,6 +208,76 @@ test_alarm(void)
     exit(1);
   }
   printf("  [PASS] AL-07: child does not inherit alarm deadline after fork\n");
+
+  // Đo độ chính xác độ trễ alarm(n) theo ticks ở cả chạy bận và pause.
+  struct sigaction alrm_act, old_alrm_act;
+  memset(&alrm_act, 0, sizeof(alrm_act));
+  alrm_act.sa_handler = alarm_accuracy_handler;
+  alrm_act.sa_restorer = sigrestorer;
+  if (sigaction(SIGALRM, &alrm_act, &old_alrm_act) < 0) {
+    printf("  [FAIL] AL-08: sigaction(SIGALRM) failed\n");
+    exit(1);
+  }
+  int delays[4] = {1, 5, 10, 50};
+  for (int i = 0; i < 4; i++) {
+    int n = delays[i];
+
+    alrm_fired = 0;
+    int t0 = uptime();
+    alarm(n);
+    while (!alrm_fired)
+      ;
+    int dt = alrm_tick - t0;
+    if (dt < n || dt > n + 3) {
+      printf("  [FAIL] AL-08 busy n=%d expected [%d,%d], got %d\n", n, n, n + 3,
+             dt);
+      exit(1);
+    }
+
+    alrm_fired = 0;
+    t0 = uptime();
+    alarm(n);
+    if (!alrm_fired) {
+      int pr = pause(n + 20);
+      if (pr != -1) {
+        printf("  [FAIL] AL-08 pause n=%d expected -1, got %d\n", n, pr);
+        exit(1);
+      }
+    }
+    if (!alrm_fired) {
+      printf("  [FAIL] AL-08 pause n=%d handler not called\n", n);
+      exit(1);
+    }
+    dt = alrm_tick - t0;
+    if (dt < n || dt > n + 3) {
+      printf("  [FAIL] AL-08 pause n=%d expected [%d,%d], got %d\n", n, n,
+             n + 3, dt);
+      exit(1);
+    }
+  }
+  sigaction(SIGALRM, &old_alrm_act, 0);
+  printf(
+    "  [PASS] AL-08: alarm tick accuracy verified for n=1,5,10,50 (busy & pause)\n");
+
+  // Kiểm tra exec() hủy alarm đang chờ theo quyết định D6.
+  int epid = fork();
+  if (epid < 0) {
+    printf("  [FAIL] AL-09: fork failed\n");
+    exit(1);
+  }
+  if (epid == 0) {
+    alarm(3);
+    char *eargv[] = {"sigtest", "exec_alarm_check", 0};
+    exec("sigtest", eargv);
+    exit(1);
+  }
+  status = 0;
+  wait(&status);
+  if (status != 0) {
+    printf("  [FAIL] AL-09: alarm was not cancelled after exec\n");
+    exit(1);
+  }
+  printf("  [PASS] AL-09: exec cancels pending alarm\n");
 
   printf("  => alarm tests: ALL PASSED\n\n");
 }

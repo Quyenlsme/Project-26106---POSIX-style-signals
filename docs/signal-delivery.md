@@ -75,6 +75,7 @@ kkill(pid, sig):
        - Nếu tìm thấy:
            a. Nếu sig == SIGKILL:
               - Đặt p->killed = 1 (giữ nguyên đường xử lý gốc của xv6 để diệt tiến trình dứt điểm).
+              - Xóa p->chan = 0.
               - Nếu p->state == SLEEPING: chuyển sang RUNNABLE.
               - Nhả p->lock và trả về 0.
            b. Nếu là tín hiệu khác:
@@ -251,7 +252,7 @@ Mọi điểm gọi đều theo chiều **khóa điều kiện → `p->lock`**, 
 
 ## 6. Tương tác với Phím Ctrl+C từ Bàn phím Console
 
-> Phần hiện thực luồng `Ctrl-C → SIGINT` và quản lý `fgpid` do Nguyễn Trung Kiên phụ trách từ tuần 3. Module Delivery chỉ cung cấp `kkill(pid, SIGINT)` và cơ chế ngắt `consoleread` qua `sig_interrupted()`.
+> Phần hiện thực luồng `Ctrl-C → SIGINT` và quản lý `fg_pid` do Nguyễn Trung Kiên phụ trách từ tuần 4. Module Delivery chỉ cung cấp `kkill(pid, SIGINT)` và cơ chế ngắt `consoleread` qua `sig_interrupted()`.
 
 
 Nhằm hiện thực hóa kịch bản người dùng nhấn `Ctrl+C` để ngắt chương trình đang chạy trong console:
@@ -327,7 +328,7 @@ Toàn bộ ca kiểm thử nằm trong `user/killtest.c` (chạy: `$ killtest` t
 
 ### 8.1. Kết quả chạy thực tế
 
-Chạy trên `main@9880d92` + thay đổi Tuần 3 của module Delivery (`sleep_prepare_intr`, `killtest` 38 checks):
+Chạy trên bản tích hợp cuối Tuần 4 (`killtest` 47 checks):
 
 | Cấu hình | `killtest` | `sigtest` | `pausetest` | `alarm_demo` / `mask_demo` | `forktest` | `usertests -q` |
 |---|---|---|---|---|---|---|

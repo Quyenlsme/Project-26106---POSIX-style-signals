@@ -2,8 +2,8 @@
 
 * **Dự án:** 26106 — POSIX-style signals trên xv6-riscv
 * **Module:** Signal Core (`kill`, `sig_send`, `sig_deliver`, `sig_interrupted`, `sleep_prepare_intr`)
-* **Người viết:** Phạm Lê Quyền — Tuần 3
-* **Phạm vi code:** `main@9880d92` + thay đổi Tuần 3 của nhánh `feature/signal-core-w3`
+* **Người viết:** Phạm Lê Quyền (cập nhật đồng bộ Tuần 5–6)
+* **Phạm vi code:** `kernel/proc.c`, `kernel/proc.h`, `kernel/trap.c`, `kernel/exec.c`, `kernel/console.c`, `kernel/pipe.c`, `kernel/sysproc.c`
 
 ---
 
@@ -14,16 +14,14 @@ Mấu chốt của thiết kế: **chỉ `pending_signals`, `killed`, `chan`, `s
 | Trường trong `struct proc` | Ghi bởi | Đọc bởi | Bị CPU khác truy cập? | Bảo vệ |
 |---|---|---|---|---|
 | `pending_signals` | `sig_send()` (người gửi, CPU bất kỳ); `sig_deliver()` xóa bit (chủ) | `sig_deliver()`, `sig_deliverable_locked()` (chủ) | **Có** | `p->lock` ở mọi chỗ ✅ |
-| `killed` | `kkill()` khi `SIGKILL`, `setkilled()` | `killed()`, `sig_deliverable_locked()`, `sig_deliver()` | **Có** | `p->lock` ✅ (trừ 1 chỗ, xem §4.2) |
+| `killed` | `kkill()` khi `SIGKILL`, `setkilled()` | `killed()`, `sig_deliverable_locked()`, `sig_deliver()` | **Có** | `p->lock` ở mọi chỗ ✅ |
 | `chan` | `sleep_prepare()`, `sleep_prepare_intr()` (chủ); `wakeup()`, `sig_send()`, `kkill()` xóa về 0 (CPU bất kỳ) | `sleep()`, `wakeup()` | **Có** | `p->lock` ✅ |
 | `state` (SLEEPING → RUNNABLE) | `sig_send()`, `kkill()`, `wakeup()`, scheduler | scheduler, `sleep()` | **Có** | `p->lock` ✅ |
-| `alarm_deadline` | `sys_alarm()` (chủ); `sig_alarm_check()` (timer, CPU bất kỳ) | như trên | **Có** | `p->lock` ✅ |
+| `alarm_deadline` | `sys_alarm()`, `kexec()` (chủ); `sig_alarm_check()` (timer trên CPU 0) | `sys_alarm()`, `sig_alarm_check()` | **Có** | `p->lock` ở mọi chỗ ✅ |
 | `blocked_signals` | `sys_sigprocmask()`, `sig_setup_frame()`, `sys_sigreturn()` (đều là chủ) | `sig_deliver()`, `sig_deliverable_locked()`, `kfork()` (đều là chủ) | Không | Không cần khóa — chỉ một luồng thực thi |
 | `sig_actions[]` | `sys_sigaction()`, `kexec()` (chủ) | `sig_deliver()`, `sig_deliverable_locked()`, `kfork()` (chủ) | Không | Không cần khóa |
 
-**Kết luận:** mọi trường bị chia sẻ giữa các CPU đều được ghi/đọc dưới `p->lock`. `blocked_signals` và `sig_actions[]` không có tranh chấp vì một tiến trình chỉ chạy trên một CPU tại một thời điểm và không ai khác chạm vào chúng.
-
-> ⚠️ Comment trong `kernel/proc.h` ghi "p->lock must be held when using these" cho cả nhóm trường signal — **không khớp với code thực tế** (`sigprocmask`, `sig_setup_frame`, `sigreturn` ghi `blocked_signals` không khóa). Code đúng; comment nên sửa lại theo bảng trên.
+**Kết luận:** mọi trường bị chia sẻ giữa các CPU đều được ghi/đọc dưới `p->lock`. `blocked_signals` và `sig_actions[]` không có tranh chấp vì một tiến trình chỉ chạy trên một CPU tại một thời điểm và không ai khác chạm vào chúng. Comment trong `kernel/proc.h` đã được tách rõ giữa nhóm private (`blocked_signals`, `sig_actions[]`) và nhóm cần `p->lock` (`pending_signals`, `alarm_deadline`).
 
 ---
 
@@ -49,7 +47,7 @@ Mọi chỗ giữ hai khóa cùng lúc đều theo **cùng một chiều: khóa 
 
 | Đường code | Thứ tự |
 |---|---|
-| `piperead` / `pipewrite` → `sig_interrupted()`, `sleep_prepare_intr()` | `pi->lock` → `p->lock` |
+| `piperead` → `sig_interrupted()`, `sleep_prepare_intr()` | `pi->lock` → `p->lock` |
 | `consoleread` → `sig_interrupted()`, `sleep_prepare_intr()` | `cons.lock` → `p->lock` |
 | `kwait` → `sig_interrupted()`, `sleep_prepare_intr()` | `wait_lock` → `p->lock` |
 | `sys_pause` → `sig_interrupted()`, `sleep_prepare_intr()` | `tickslock` → `p->lock` |
@@ -90,21 +88,16 @@ Vì `sig_send()` cũng cần `p->lock`, nó chỉ có thể chạy **trước** 
 | Chỉ có `p->chan = 0` | 7 / 300 |
 | + `sleep_prepare_intr()` | 0 / 300 |
 
-### 4.2. `sig_deliver()` đọc `p->killed` không khóa — rủi ro thấp
-```c
-if (p->killed)      // kernel/trap.c, đọc trần
-    kexit(-1);
-```
-`killed` có thể bị CPU khác ghi cùng lúc. Trên RISC-V phép đọc `int` căn lề là nguyên tử nên không sai kết quả (cùng lắm trễ một lần trả về user), nhưng về hình thức là data race. **Đề xuất:** đổi thành `if (killed(p))`.
-
-### 4.3. Comment trong `proc.h` (xem §1)
-Đề xuất: *"`pending_signals`, `alarm_deadline`, `chan`: cần `p->lock`. `blocked_signals`, `sig_actions`: chỉ tiến trình sở hữu truy cập, không cần khóa."*
+### 4.2. Các điểm đồng bộ hóa đã hoàn tất xử lý
+* **`sig_deliver()` đọc `killed`:** Đã đổi từ `if (p->killed)` sang `if (killed(p))` (đọc dưới `p->lock`, `kernel/trap.c`).
+* **`kexec()` hủy `alarm_deadline`:** Đã bọc `acquire(&p->lock); p->alarm_deadline = 0; release(&p->lock);` (`kernel/exec.c`) để tránh data race với `sig_alarm_check()` trên CPU 0.
+* **Comment trong `kernel/proc.h`:** Đã tách rõ nhóm private (`blocked_signals`, `sig_actions[]`) và nhóm bảo vệ bởi `p->lock` (`pending_signals`, `alarm_deadline`).
 
 ---
 
 ## 5. Bằng chứng kiểm thử
 
-`user/killtest.c` — 12 nhóm / 38 kiểm tra (đánh số theo `week-03-plan`):
+`user/killtest.c` — 17 nhóm / 60 kiểm tra (`DL-01` đến `DL-18`, trừ `DL-11` ở `ctrlc_demo`):
 
 | Test | Nội dung | Mã |
 |---|---|---|
@@ -117,11 +110,16 @@ if (p->killed)      // kernel/trap.c, đọc trần
 | 10 | Signal có handler ngắt `read()`: trả `-1`, handler chạy, tiến trình sống; 500 vòng gửi đúng lúc vào `read()` → **0 lần mất wakeup** | DL-10 |
 | 11 | 4 tiến trình × 200 `kill` đồng thời → không mất bit; 4 tiến trình cùng `SIGKILL` 4 nạn nhân → không panic/deadlock | DL-13 |
 | 12 | Signal đang bị chặn **không** ngắt `read()` | DL-12 |
+| 13 | Gửi signal tới tiến trình `ZOMBIE` trả `-1`; `wait()` nhận đúng status | DL-14 |
+| 14 | `SIGKILL` vẫn kết thúc tiến trình đã chặn hết signal và đang `pause()` | DL-15 |
+| 15 | Tự gửi signal có handler: handler chạy xong ngay khi `kill()` trả về | DL-16 |
+| 16 | Từ chối signal ngoài `SUPPORTED_MASK` (`5`, `31`), không đánh thức nhầm tiến trình đang ngủ | DL-17 |
+| 17 | Hành vi mặc định (`SIG_DFL`) của cả 7 signal đều kết thúc tiến trình với status `-1` | DL-18 |
 
-| Cấu hình | `killtest` | `sigtest` | `pausetest` | `forktest` | `usertests -q` |
+| Cấu hình | `killtest` | `sigtest` | `pausetest` | `regtest` | `usertests -q` |
 |---|---|---|---|---|---|
-| `CPUS=1` | 38/38 PASS × 3 lần | ALL PASSED | 12/12 | OK | ALL TESTS PASSED |
-| `CPUS=4` | 38/38 PASS × 3 lần | ALL PASSED | 12/12 | OK | ALL TESTS PASSED |
+| `CPUS=1` | 60/60 PASS | ALL PASSED | 12/12 PASS | REG-01..39 PASS | ALL TESTS PASSED |
+| `CPUS=4` | 60/60 PASS | ALL PASSED | 12/12 PASS | REG-01..39 PASS | ALL TESTS PASSED |
 
 ---
 
@@ -162,16 +160,16 @@ Không có đường code nào **đang giữ `p->lock` rồi mới lấy `cons.l
 
 ### 6.4. Giới hạn đã biết (không phải lỗi đồng bộ)
 
-* **Khe trước `setfg(pid)`:** `sh.c` gọi `setfg(pid)` sau `fork1()`; nếu Ctrl-C được bấm trong khoảng rất ngắn trước lời gọi này thì `fg_pid` còn là 0 và phím bị bỏ qua.
 * **Pipeline / lệnh lồng:** `fg_pid` là tiến trình con trực tiếp của shell; các tiến trình cháu (ví dụ `a | b`) không nhận `SIGINT` (không làm process group – phương án PA-2 để dành cho stretch).
-* **Ctrl-C tại dấu nhắc:** shell không bị kết thúc (đúng yêu cầu), dòng đang gõ bị bỏ, nhưng shell không in lại dấu nhắc `$` mới cho tới khi người dùng gõ lệnh tiếp.
+* *(Đã khắc phục ở Tuần 5: khe trước `setfg(pid)` đóng bằng việc con gọi `setfg(getpid())` ngay sau `fork1()`; dấu nhắc `$ ` được in lại khi nhấn Ctrl-C lúc `fg_pid == 0`.)*
 
-### 6.5. Bằng chứng kiểm thử (bản gộp `feature/signal-edge-w4` + `feature/ctrlc-sigint`)
+### 6.5. Bằng chứng kiểm thử (`./test-xv6.py signals`)
 
 | Tình huống DL-11 | `CPUS=1` | `CPUS=4` |
 |---|---|---|
-| Ctrl-C tại dấu nhắc shell → shell vẫn sống, nhận lệnh tiếp | PASS | PASS |
+| Ctrl-C tại dấu nhắc shell → in lại `$ `, shell vẫn sống, nhận lệnh tiếp | PASS | PASS |
 | `ctrlc_demo` (có handler) → handler chạy, in thông báo, thoát, về dấu nhắc | PASS | PASS |
 | `ctrlc_demo dfl` (`SIG_DFL`) → tiến trình kết thúc, về dấu nhắc | PASS | PASS |
+| Tiến trình chạy nền (`ctrlc_demo dfl > bg.out &`) → không bị Ctrl-C kết thúc nhầm | PASS | PASS |
 
-Cùng bản gộp: `killtest` 47/47 PASS (`CPUS=1` và `CPUS=4`), `usertests -q` ALL TESTS PASSED (`CPUS=4`).
+Cùng bản kiểm chứng: `killtest` 60/60 PASS (`CPUS=1` và `CPUS=4`), `usertests -q` ALL TESTS PASSED (`CPUS=4`).

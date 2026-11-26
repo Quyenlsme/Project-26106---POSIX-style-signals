@@ -10,7 +10,7 @@
 ## 1. Môi trường và Quy tắc Kiểm thử
 
 ### 1.1. Cấu hình Môi trường
-- **Môi trường mô phỏng:** QEMU emulator version 7.0+ trên kiến trúc `riscv64`.
+- **Môi trường mô phỏng:** QEMU emulator version 7.2+ trên kiến trúc `riscv64`.
 - **Toolchain biên dịch:** `riscv64-unknown-elf-gcc` (hoặc `riscv64-linux-gnu-gcc`).
 - **Cấu hình CPU:**
   - Cấu hình đơn lõi: `make qemu CPUS=1` (kiểm tra tính đúng đắn logic).
@@ -75,7 +75,7 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ---
 
-### 2.3. Module Masking & Alarm — Nguyễn Trung Kiên (`MK-01` đến `AL-07`)
+### 2.3. Module Masking, Alarm & Pause — Nguyễn Trung Kiên (`MK-01` đến `AL-09`, `PA-01` đến `PA-06`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
@@ -85,7 +85,7 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **MK-04** | Đọc mask cũ qua `oldset` | Gọi `sigprocmask` với `oldset` hợp lệ | Nhận đúng giá trị mask của trạng thái trước đó | PASS — `sigtest` T1.1, T1.2; `regtest` REG-04, REG-10 |
 | **MK-05** | Ngăn chặn việc chặn `SIGKILL` | Cố tình truyền bit `SIGKILL` vào `set` | Bit `SIGKILL` bị `sig_sanitize` loại bỏ, không thể chặn | PASS — `sigtest` T1.3; `regtest` REG-09, REG-20 |
 | **MK-06** | Tham số `how` không hợp lệ | Truyền `how = 99` | Syscall trả về `-1`, mask không bị biến đổi | PASS — `sigtest` T1.5; `regtest` REG-18 |
-| **MK-07** | Con trỏ `set`/`oldset` rác | Truyền địa chỉ bộ nhớ không hợp lệ hoặc NULL an toàn | Syscall kiểm tra an toàn, trả về `-1` hoặc xử lý đúng quy cách | PASS — `regtest` REG-10, `sigtest` T1.2 |
+| **MK-07** | Con trỏ `set`/`oldset` rác | Truyền địa chỉ ngoài không gian tiến trình (`0xdeadbeef`) vào `set` và `oldset` | Syscall trả về `-1`, mask không bị biến đổi | PASS — `sigtest` T1.6 (`CPUS=1`, `CPUS=4`) |
 | **AL-01** | Hẹn giờ cơ bản `alarm(n)` | Đặt handler `SIGALRM`, gọi `alarm(5)` | Handler được gọi sau khoảng 5 ticks | PASS — `sigtest` T2.1; `pausetest` PA-02; `alarm_demo` |
 | **AL-02** | Hủy hẹn giờ qua `alarm(0)` | Gọi `alarm(50)`, sau đó gọi `alarm(0)` | Hủy thành công, không có `SIGALRM` nào kích hoạt | PASS — `sigtest` T2.3, T2.4; `alarm_demo` |
 | **AL-03** | Ghi đè hẹn giờ cũ | Gọi `alarm(50)`, sau đó gọi `alarm(10)` | Trả về số tick còn lại của lần trước (~50), deadline mới = 10 | PASS — `sigtest` T2.2 |
@@ -93,6 +93,14 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **AL-05** | Kết hợp `alarm` và `sigprocmask` | Block `SIGALRM`, gọi `alarm(3)`, chờ 5 ticks | Alarm hết hạn, `SIGALRM` giữ pending; unblock thì handler chạy | PASS — `pausetest` PA-03 |
 | **AL-06** | Độc lập đa CPU với Alarm | Chạy test alarm trên `CPUS=1` và `CPUS=4` | Tốc độ trôi deadline không bị phụ thuộc số lượng CPU | PASS — `sigtest`, `pausetest`, `alarm_demo` trên CPUS=1 và CPUS=4 |
 | **AL-07** | Fork không thừa kế Alarm | Cha gọi `alarm(50)`, gọi `fork()` | Tiến trình con có `alarm_deadline == 0`, không bị kích hoạt nhầm | PASS — `sigtest` T2.6 |
+| **AL-08** | Độ chính xác tick của `alarm(n)` | Đo `dt = uptime() - t0` với `n` ∈ `{1, 5, 10, 50}` ở cả chạy bận và `pause()` | Độ trễ `dt` nằm trong `[n, n+3]` ticks, không nổ sớm | PASS — `sigtest` T2.7 (`CPUS=1`, `CPUS=4`) |
+| **AL-09** | Exec hủy Alarm đang chờ (khác POSIX theo D6) | Con đặt `alarm(3)` rồi `exec("sigtest", ...)` | Sau `exec()`, `alarm(0) == 0` và tiến trình không bị `SIGALRM` kết thúc | PASS — `sigtest` T2.8 (`CPUS=1`, `CPUS=4`) |
+| **PA-01** | Gọi `pause(0)` | Gọi `pause(0)` | Trả về `0` ngay lập tức | PASS — `pausetest` PA-01 |
+| **PA-02** | `SIGALRM` ngắt `pause` dài | Đặt handler, `alarm(5)`, gọi `pause(1000)` | Trả về `-1`, handler chạy 1 lần, thức dậy sớm | PASS — `pausetest` PA-02 |
+| **PA-03** | `SIGALRM` bị block khi `pause` | Chặn `SIGALRM`, `alarm(3)`, gọi `pause(10)` | Trả về `0`, ngủ đủ 10 ticks; unblock xong handler chạy | PASS — `pausetest` PA-03 |
+| **PA-04** | `SIG_IGN` không ngắt `pause` | Đặt `SIGUSR1 = SIG_IGN`, con gửi `SIGUSR1` lúc cha `pause(15)` | `pause` không bị ngắt, trả về `0` | PASS — `pausetest` PA-04 |
+| **PA-05** | Tiến trình khác gửi signal ngắt `pause` | Đặt handler `SIGUSR1`, con gửi `SIGUSR1` lúc cha `pause(1000)` | Trả về `-1`, handler chạy 1 lần | PASS — `pausetest` PA-05 |
+| **PA-06** | Mô phỏng chờ vô hạn | Đặt `alarm(5)`, gọi `pause(0x7fffffff)` | Thức dậy bởi `SIGALRM`, trả về `-1` | PASS — `pausetest` PA-06 |
 
 ---
 
@@ -100,8 +108,8 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
-| **IN-01** | Chu trình đầy đủ | `sigaction` + `sigprocmask` + `alarm` + `sigreturn` | Tất cả hoạt động trơn tru trong một tiến trình | PASS — `sigtest` T5; `regtest` REG-01..33 |
-| **IN-02** | Alarm kích hoạt khi lồng | Đang chạy Handler `SIGUSR1`, timer `SIGALRM` hết hạn | Lồng tầng handler thứ 2 an toàn, unwind đúng thứ tự | PASS — `regtest` REG-06, `pausetest` PA-06 |
+| **IN-01** | Chu trình đầy đủ | `sigaction` + `sigprocmask` + `alarm` + `sigreturn` | Tất cả hoạt động trơn tru trong một tiến trình | PASS — `sigtest` T5; `regtest` REG-01..39 |
+| **IN-02** | Alarm kích hoạt khi lồng | Đang chạy Handler `SIGUSR1`, timer `SIGALRM` hết hạn | Lồng tầng handler thứ 2 an toàn, unwind đúng thứ tự | PASS — `regtest` REG-34, REG-39; `pausetest` PA-06 |
 | **IN-03** | Fork thừa kế Action & Mask | Cha cài đặt handler và mask, sau đó `fork()` | Con nhận tín hiệu và thực thi đúng handler của cha | PASS — `regtest` REG-25, REG-26, REG-27 |
 | **IN-04** | Exec reset Handler về DFL | Đăng ký handler, gọi `exec("ls", ...)` | Binary mới nhận signal sẽ xử lý theo `SIG_DFL` | PASS — `regtest` REG-28 |
 | **RG-01** | Toàn bộ Usertests xv6 | Chạy lệnh `usertests` trên terminal QEMU | Toàn bộ các bài test gốc của xv6 đạt `ALL TESTS PASSED` | PASS — `usertests` đầy đủ đạt `ALL TESTS PASSED` trên cả `CPUS=1` và `CPUS=4` |
@@ -109,13 +117,14 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ---
 
-### 2.5. Nhóm Tự động hóa Kiểm thử & CI — Nguyễn Trung Kiên (`AU-01` đến `AU-03`)
+### 2.5. Nhóm Tự động hóa Kiểm thử & CI — Nguyễn Trung Kiên (`AU-01` đến `AU-04`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
-| **AU-01** | Tự động hóa Unit tests | Script python chạy lần lượt `killtest`, `regtest`, `sigtest`, `pausetest` | Bắt kết quả ALL PASSED/0 FAIL, không panic/treo | PASS — `./test-xv6.py signals` |
-| **AU-02** | Tự động hóa 2 Demo | Script chạy `alarm_demo` và `mask_demo` | Bắt đúng output `5 alarms` và `after unblock: count=1` | PASS — `./test-xv6.py signals` |
-| **AU-03** | Tự động hóa DL-11 (Ctrl-C) | Script inject byte `0x03` qua stdin QEMU vào: shell prompt, `ctrlc_demo` (handler), `ctrlc_demo dfl` | Shell sống, handler bắt đúng, DFL kết thúc tiến trình | PASS — `./test-xv6.py signals` |
+| **AU-01** | Tự động hóa Unit tests | Script python chạy lần lượt `sigtest`, `pausetest`, `killtest`, `regtest` | Bắt kết quả ALL PASSED/0 FAIL, không panic/treo | PASS — `./test-xv6.py signals` (`CPUS=1`, `CPUS=4`) |
+| **AU-02** | Tự động hóa 2 Demo | Script chạy `alarm_demo` và `mask_demo` | Bắt đúng output `5 alarms` và `after unblock: count=1` | PASS — `./test-xv6.py signals` (`CPUS=1`, `CPUS=4`) |
+| **AU-03** | Tự động hóa DL-11 (Ctrl-C) | Script inject byte `0x03` qua stdin QEMU vào: shell prompt, `ctrlc_demo` (handler), `ctrlc_demo dfl`, và tiến trình chạy nền (`&`) | Shell sống, handler bắt đúng, DFL kết thúc tiến trình, tiến trình nền không bị kết thúc nhầm | PASS — `./test-xv6.py signals` (`CPUS=1`, `CPUS=4`) |
+| **AU-04** | Chặn PASS giả & phát hiện `FAIL`/`panic:` | `QEMU.monitor_since()` chỉ quét output mới và dừng ngay khi gặp `[FAIL]`, `REG-XX FAIL`, `N FAIL` (`N >= 1`) hoặc `panic:` | Một ca `FAIL` cố ý làm `./test-xv6.py signals` trả về mã lỗi khác 0 ngay lập tức | PASS — `./test-xv6.py signals` (`CPUS=1`, `CPUS=4`) |
 
 ---
 

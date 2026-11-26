@@ -148,7 +148,9 @@ kexec(char *path, char **argv)
       p->sig_actions[i].sa_restorer = 0;
     }
   }
+  acquire(&p->lock);
   p->alarm_deadline = 0;
+  release(&p->lock);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 

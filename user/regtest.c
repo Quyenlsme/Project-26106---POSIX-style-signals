@@ -747,24 +747,25 @@ main(int argc, char *argv[])
     act.sa_flags = 0;
     act.sa_restorer = 0;
 
-    // Save old action and register the new action
     if (sigaction(SIGUSR1, &act, &oldact) < 0) {
       printf("REG-11 FAIL: sigaction registration failed\n");
+      exit(1);
     } else if (sigaction(SIGUSR1, 0, &checkact) < 0) {
       printf("REG-11 FAIL: cannot read back sigaction\n");
+      exit(1);
     } else if ((checkact.sa_mask & (1U << SIGUSR2)) == 0 ||
                (checkact.sa_mask & (1U << 20)) != 0 ||
                (checkact.sa_mask & (1U << SIGKILL)) != 0) {
       printf("REG-11 FAIL: sa_mask was not sanitized correctly\n");
+      exit(1);
     } else {
       printf("REG-11 PASS: sigaction filters unsupported signals\n");
     }
 
-    // Restore the original action
     sigaction(SIGUSR1, &oldact, 0);
   }
 
-  // REG-12: Test sigaction rejects invalid signals
+  // REG-12: Test sigaction rejects invalid and unsupported signals
   {
     int pass = 1;
 
@@ -780,10 +781,18 @@ main(int argc, char *argv[])
     if (sigaction(SIGKILL, 0, 0) != -1)
       pass = 0;
 
-    if (pass)
+    if (sigaction(5, 0, 0) != -1)
+      pass = 0;
+
+    if (sigaction(31, 0, 0) != -1)
+      pass = 0;
+
+    if (pass) {
       printf("REG-12 PASS: sigaction rejects invalid signals\n");
-    else
+    } else {
       printf("REG-12 FAIL: sigaction accepted an invalid signal\n");
+      exit(1);
+    }
   }
 
   // REG-13: Test sigaction rejects unsupported flags
@@ -799,6 +808,7 @@ main(int argc, char *argv[])
       printf("REG-13 PASS: sigaction rejects unsupported flags\n");
     } else {
       printf("REG-13 FAIL: sigaction accepted unsupported flags\n");
+      exit(1);
     }
   }
 
@@ -815,6 +825,7 @@ main(int argc, char *argv[])
       printf("REG-14 PASS: sigaction rejects handler without restorer\n");
     } else {
       printf("REG-14 FAIL: sigaction accepted handler without restorer\n");
+      exit(1);
     }
   }
 
@@ -832,19 +843,20 @@ main(int argc, char *argv[])
     act2.sa_flags = 0;
     act2.sa_restorer = 0;
 
-    // Install the first action
     if (sigaction(SIGUSR1, &act1, 0) < 0) {
       printf("REG-15 FAIL: cannot install first action\n");
+      exit(1);
     } else if (sigaction(SIGUSR1, &act2, &oldact) < 0) {
       printf("REG-15 FAIL: cannot replace action\n");
+      exit(1);
     } else if (oldact.sa_handler != SIG_IGN) {
       printf("REG-15 FAIL: old action was not returned\n");
+      exit(1);
     } else {
       printf("REG-15 PASS: sigaction returns old action\n");
     }
 
-    // Restore default action
-    sigaction(SIGUSR1, &act1, 0);
+    sigaction(SIGUSR1, &act2, 0);
   }
 
   // REG-16: Test sigaction rejects invalid user address
@@ -853,6 +865,7 @@ main(int argc, char *argv[])
       printf("REG-16 PASS: sigaction rejects invalid act address\n");
     } else {
       printf("REG-16 FAIL: sigaction accepted invalid act address\n");
+      exit(1);
     }
   }
 
@@ -862,6 +875,7 @@ main(int argc, char *argv[])
       printf("REG-17 PASS: sigaction rejects invalid oldact address\n");
     } else {
       printf("REG-17 FAIL: sigaction accepted invalid oldact address\n");
+      exit(1);
     }
   }
 
@@ -869,9 +883,9 @@ main(int argc, char *argv[])
   {
     sigset_t set = (1U << SIGUSR2);
 
-    // Set != NULL, invalid how must return -1
     if (sigprocmask(99, &set, 0) != -1) {
       printf("REG-18 FAIL: invalid how was accepted\n");
+      exit(1);
     } else {
       printf("REG-18 PASS: sigprocmask rejects invalid how\n");
     }
@@ -889,6 +903,7 @@ main(int argc, char *argv[])
       printf("REG-19 PASS: NULL set does not change signal mask\n");
     } else {
       printf("REG-19 FAIL: unexpected result with NULL set\n");
+      exit(1);
     }
   }
   // REG-20: SIGKILL cannot be blocked using SIG_SETMASK
@@ -904,9 +919,9 @@ main(int argc, char *argv[])
       printf("REG-20 PASS: SIGKILL cannot be blocked using SIG_SETMASK\n");
     } else {
       printf("REG-20 FAIL: SIG_SETMASK did not sanitize SIGKILL\n");
+      exit(1);
     }
 
-    // Restore original mask
     sigprocmask(SIG_SETMASK, &oldset, 0);
   }
 
@@ -916,14 +931,11 @@ main(int argc, char *argv[])
 
     set = (1U << SIGUSR1) | (1U << SIGUSR2);
 
-    // Block both signals
     sigprocmask(SIG_BLOCK, &set, &oldset);
 
-    // Unblock only SIGUSR1
     sigset_t unblock_set = (1U << SIGUSR1);
     int result = sigprocmask(SIG_UNBLOCK, &unblock_set, 0);
 
-    // Read current mask
     sigprocmask(SIG_BLOCK, 0, &newset);
 
     if (result == 0 && !(newset & (1U << SIGUSR1)) &&
@@ -931,17 +943,18 @@ main(int argc, char *argv[])
       printf("REG-21 PASS: SIG_UNBLOCK only unblocks requested signal\n");
     } else {
       printf("REG-21 FAIL: SIG_UNBLOCK modified unexpected signals\n");
+      exit(1);
     }
 
-    // Restore original mask
     sigprocmask(SIG_SETMASK, &oldset, 0);
   }
 
   // REG-22: Test sigaction with both act and oldact
   {
-    struct sigaction old_action, new_action, returned_action;
+    struct sigaction orig_action, old_action, new_action, returned_action;
 
-    // Set initial action to SIG_IGN
+    sigaction(SIGUSR1, 0, &orig_action);
+
     new_action.sa_handler = SIG_IGN;
     new_action.sa_mask = 0;
     new_action.sa_flags = 0;
@@ -949,12 +962,10 @@ main(int argc, char *argv[])
 
     sigaction(SIGUSR1, &new_action, 0);
 
-    // Set new action to SIG_DFL and retrieve old action
     new_action.sa_handler = SIG_DFL;
 
     int result = sigaction(SIGUSR1, &new_action, &old_action);
 
-    // Read current action
     sigaction(SIGUSR1, 0, &returned_action);
 
     if (result == 0 && old_action.sa_handler == SIG_IGN &&
@@ -962,10 +973,10 @@ main(int argc, char *argv[])
       printf("REG-22 PASS: sigaction updates action and returns old action\n");
     } else {
       printf("REG-22 FAIL: sigaction did not handle both pointers correctly\n");
+      exit(1);
     }
 
-    // Restore original action
-    sigaction(SIGUSR1, &old_action, 0);
+    sigaction(SIGUSR1, &orig_action, 0);
   }
 
   // REG-23: SIG_IGN does not require sa_restorer
@@ -988,6 +999,7 @@ main(int argc, char *argv[])
       printf("REG-23 PASS: SIG_IGN does not require sa_restorer\n");
     } else {
       printf("REG-23 FAIL: SIG_IGN incorrectly requires sa_restorer\n");
+      exit(1);
     }
 
     sigaction(SIGUSR1, &old_action, 0);
@@ -1036,6 +1048,7 @@ main(int argc, char *argv[])
       printf("REG-24 PASS: Multiple pending signals were delivered\n");
     } else {
       printf("REG-24 FAIL: Not all pending signals were delivered\n");
+      exit(1);
     }
 
     sigaction(SIGUSR1, &old_usr1, 0);
