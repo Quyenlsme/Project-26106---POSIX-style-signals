@@ -672,6 +672,116 @@ test_default_actions(void)
   }
 }
 
+// ---------------------------------------------------------------------------
+// Test 18 (DL-19): SIGALRM sinh ra tu timer interrupt (CPU 0, sig_alarm_check)
+// danh thuc tien trinh dang ngu trong read() / wait() / pause().
+// Moi ca chay trong mot tien trinh con rieng, con tra ket qua qua exit status:
+// 10 = dung ky vong. Cha ghi 1 byte vao pipe sau 30 tick de con khong bi treo
+// neu alarm KHONG danh thuc no (khi do con nhan duoc du lieu -> sai ky vong).
+// ---------------------------------------------------------------------------
+#define AL_READ_HANDLER  0
+#define AL_WAIT_HANDLER  1
+#define AL_PAUSE_HANDLER 2
+#define AL_READ_IGN      3
+#define AL_READ_BLOCKED  4
+#define AL_READ_DFL      5
+
+static int
+alarm_case_child(int mode, int rfd)
+{
+  unsigned int zero = 0, alrm = 1U << SIGALRM;
+  sigprocmask(SIG_SETMASK, &zero, 0);
+  alrm_count = 0;
+  char c;
+
+  if (mode == AL_READ_IGN)
+    set_handler(SIGALRM, SIG_IGN);
+  else if (mode == AL_READ_DFL)
+    set_handler(SIGALRM, SIG_DFL);
+  else
+    set_handler(SIGALRM, on_alrm);
+
+  if (mode == AL_READ_HANDLER) {
+    alarm(5);
+    int r = read(rfd, &c, 1);
+    return (r == -1 && alrm_count == 1) ? 10 : 1;
+  }
+  if (mode == AL_WAIT_HANDLER) {
+    int gc = fork();
+    if (gc == 0) {
+      pause(200);
+      exit(0);
+    }
+    alarm(5);
+    int r = wait(0);
+    int seen = alrm_count;
+    kill(gc, SIGKILL);
+    wait(0);
+    return (r == -1 && seen == 1) ? 10 : 1;
+  }
+  if (mode == AL_PAUSE_HANDLER) {
+    alarm(5);
+    int t0 = uptime();
+    int r = pause(100);
+    int dt = uptime() - t0;
+    return (r == -1 && alrm_count == 1 && dt < 100) ? 10 : 1;
+  }
+  if (mode == AL_READ_IGN) {
+    alarm(5);
+    int r = read(rfd, &c, 1);
+    return (r == 1) ? 10 : 1;
+  }
+  if (mode == AL_READ_BLOCKED) {
+    sigprocmask(SIG_BLOCK, &alrm, 0);
+    alarm(5);
+    int r = read(rfd, &c, 1);
+    int before = alrm_count;
+    sigprocmask(SIG_UNBLOCK, &alrm, 0); // handler phai chay ngay tai day
+    return (r == 1 && before == 0 && alrm_count == 1) ? 10 : 1;
+  }
+  // AL_READ_DFL: SIGALRM phai ket thuc con truoc khi read() tra ve.
+  alarm(5);
+  read(rfd, &c, 1);
+  return 1;
+}
+
+static int
+run_alarm_case(int mode)
+{
+  int fd[2];
+  pipe(fd);
+  int pid = fork();
+  if (pid == 0) {
+    close(fd[1]);
+    exit(alarm_case_child(mode, fd[0]));
+  }
+  close(fd[0]);
+  pause(30);
+  write(fd[1], "x", 1);
+  close(fd[1]);
+  int status = 0;
+  wait(&status);
+  return status;
+}
+
+static void
+test_alarm_wakeup(void)
+{
+  printf("Test 18 (DL-19): SIGALRM tu timer danh thuc tien trinh dang ngu\n");
+  check(run_alarm_case(AL_READ_HANDLER) == 10,
+        "read() dang cho + handler: read tra -1, handler chay 1 lan");
+  check(run_alarm_case(AL_WAIT_HANDLER) == 10,
+        "wait() dang cho + handler: wait tra -1, handler chay 1 lan");
+  check(run_alarm_case(AL_PAUSE_HANDLER) == 10,
+        "pause(100) + handler: pause tra -1 truoc 100 tick");
+  check(run_alarm_case(AL_READ_IGN) == 10,
+        "SIG_IGN: read() khong bi ngat, nhan du lieu binh thuong");
+  check(run_alarm_case(AL_READ_BLOCKED) == 10,
+        "bi chan: read() khong bi ngat; mo chan -> handler chay");
+  check(run_alarm_case(AL_READ_DFL) == -1,
+        "SIG_DFL: SIGALRM ket thuc con voi status -1");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -701,6 +811,7 @@ main(int argc, char *argv[])
   test_self_send_handler();
   test_unsupported_signal();
   test_default_actions();
+  test_alarm_wakeup();
 
   printf("=== Ket qua: %d PASS, %d FAIL ===\n", passed, failed);
   if (failed == 0)
