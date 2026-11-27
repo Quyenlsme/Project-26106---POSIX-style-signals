@@ -52,7 +52,7 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 
 ---
 
-### 2.2. Module Handler & Context — Trần Việt Hưng (`HD-01` đến `HD-16`)
+### 2.2. Module Handler & Context — Trần Việt Hưng (`HD-01` đến `HD-18`)
 
 | Mã Test | Tình huống kiểm thử | Thiết lập & Hành động | Kết quả mong đợi | Trạng thái |
 |---|---|---|---|---|
@@ -72,6 +72,8 @@ Theo quy định tại `AGENTS.md`, một ca kiểm thử chỉ được đánh 
 | **HD-14** | Sa_mask trì hoãn signal khác | Đăng ký handler `SIGUSR1` với `sa_mask` chứa `SIGUSR2`; gửi `SIGUSR2` trong khi handler `SIGUSR1` đang thực thi | `SIGUSR2` bị trì hoãn cho đến khi handler `SIGUSR1` kết thúc; sau đó handler `SIGUSR2` được thực thi | PASS — `regtest` REG-37; CPUS=1, CPUS=4 |
 | **HD-15** | Kiểm tra mask trong handler và khôi phục mask ban đầu | Thiết lập signal mask ban đầu, đăng ký handler và kiểm tra mask trong quá trình handler thực thi | Mask trong handler đúng theo cấu hình `sa_mask` và signal tự động bị chặn; sau `sigreturn`, mask ban đầu được khôi phục chính xác | PASS — `regtest` REG-38; CPUS=1, CPUS=4 |
 | **HD-16** | Re-arm SIGALRM và bảo toàn trạng thái CPU | Đăng ký handler `SIGALRM`, đặt alarm ban đầu; handler tự gọi lại `alarm()` cho đến đủ 5 lần; thực hiện tính toán và kiểm tra `s1-s11` | Handler được gọi đủ 5 lần; kết quả tính toán chính xác; các thanh ghi `s1-s11` được bảo toàn sau các lần xử lý signal | PASS — `regtest` REG-39; CPUS=1, CPUS=4 |
+| **HD-17** | Alarm overrun khi SIGALRM handler đang chạy | Handler gọi `alarm(1)` rồi chạy bận khoảng 3 ticks; lặp 10 lần | SIGALRM hết hạn trong handler được giữ pending do tự block; handler kế tiếp chỉ chạy sau `sigreturn()`, không đệ quy; độ sâu tối đa 1 và `sp` main không đổi | PASS — `regtest` REG-40; CPUS=1, CPUS=4; `docs/logs/week6-cpus1.log`, `docs/logs/week6-cpus4.log` |
+| **HD-18** | SIGALRM lặp xen kẽ SIGUSR1 | SIGALRM re-arm 20 lần; tiến trình con gửi SIGUSR1 liên tục; kiểm tra nested hai chiều | Đủ 20 SIGALRM; nested hai chiều unwind LIFO; `s1-s11`, signal mask và `sp` main được bảo toàn | PASS — `regtest` REG-41; CPUS=1, CPUS=4; `docs/logs/week6-cpus1.log`, `docs/logs/week6-cpus4.log` |
 
 ---
 

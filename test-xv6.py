@@ -9,7 +9,7 @@
 # ./test-xv6.py log (runs the log crash test)
 # ./test-xv6.py signals (runs POSIX signal tests: AU-01..AU-03)
 
-import argparse, os, inspect, re, signal, subprocess, sys, time
+import argparse, os, inspect, re, signal, subprocess, sys, time, random
 from subprocess import run
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -140,6 +140,10 @@ class QEMU(object):
 
 def crash_log(delay=2):
     q = QEMU(True)
+
+    # Đợi xv6 khởi động xong và shell sẵn sàng.
+    q.monitor(r'^\$ ', timeout=30)
+
     q.cmd("logstress f0 f1 f2 f3 f4 f5\n")
     time.sleep(delay)
     q.crash()
@@ -164,14 +168,14 @@ def recover_log():
 def forphan():
     q = QEMU(True)
     q.cmd("forphan\n")
-    q.monitor('wait', timeout=30)
+    q.monitor(r'.*wait for kill and reclaim', timeout=30)
     q.crash()
     q.stop()
 
 def dorphan():
     q = QEMU(True)
     q.cmd("dorphan\n")
-    q.monitor('wait', timeout=30)
+    q.monitor(r'.*wait for kill and reclaim', timeout=30)
     q.crash()
     q.stop()
 
@@ -183,10 +187,13 @@ def recover_orphan():
 def test_log():
     print("Test recovery of log")
 
-    for i in range(20):
-        delay = 1.0 + i * 0.15
+    attempts = 30
 
-        print(f"Crash attempt {i + 1}, delay = {delay:.2f}s")
+    for i in range(attempts):
+        # Thay đổi thời điểm kill để tránh lặp lại cùng một nhịp timing.
+        delay = random.uniform(0.75, 4.5)
+
+        print(f"Crash attempt {i + 1}/{attempts}, delay = {delay:.2f}s")
 
         crash_log(delay)
         ok = recover_log()

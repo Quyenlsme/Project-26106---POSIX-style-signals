@@ -332,7 +332,7 @@ sigreturn() -> Khôi phục Main Program
 
 ---
 
-## 7. Ma trận Kiểm thử Module Handler (HD-01 đến HD-16)
+## 7. Ma trận Kiểm thử Module Handler (HD-01 đến HD-18)
 
 | Mã Test | Tình huống kiểm thử | Hành động & Dữ liệu đầu vào | Kết quả mong đợi |
 |---|---|---|---|
@@ -352,3 +352,5 @@ sigreturn() -> Khôi phục Main Program
 | **HD-14** | Sa_mask trì hoãn signal khác | Đăng ký handler `SIGUSR1` với `sa_mask` chứa `SIGUSR2`; gửi `SIGUSR2` trong khi handler `SIGUSR1` đang thực thi | `SIGUSR2` bị trì hoãn cho đến khi handler `SIGUSR1` kết thúc; sau đó handler `SIGUSR2` được thực thi |
 | **HD-15** | Kiểm tra mask trong handler và khôi phục mask ban đầu | Thiết lập signal mask ban đầu, đăng ký handler và kiểm tra mask trong quá trình handler thực thi | Mask trong handler đúng theo cấu hình `sa_mask` và signal tự động bị chặn; sau `sigreturn`, mask ban đầu được khôi phục chính xác |
 | **HD-16** | Re-arm SIGALRM và bảo toàn trạng thái CPU | Đăng ký handler `SIGALRM`, đặt alarm ban đầu; handler tự gọi lại `alarm()` cho đến đủ 5 lần; thực hiện tính toán và kiểm tra `s1-s11` | Handler được gọi đủ 5 lần; kết quả tính toán chính xác; các thanh ghi `s1-s11` được bảo toàn sau các lần xử lý signal |
+| **HD-17** | Alarm overrun trong SIGALRM handler | Handler gọi `alarm(1)` rồi tiếp tục chạy bận khoảng 3 ticks; lặp lại 10 lần | SIGALRM hết hạn trong handler được giữ pending do tự block, chỉ chạy sau `sigreturn()`; không nested đệ quy cùng SIGALRM; độ sâu tối đa 1 và `sp` của main không đổi |
+| **HD-18** | SIGALRM lặp xen kẽ SIGUSR1 | Handler SIGALRM re-arm 20 lần; tiến trình con gửi SIGUSR1 liên tục; hai handler tạm mở mask peer để tạo nested hai chiều | Đủ 20 SIGALRM; SIGALRM có lúc nested trong SIGUSR1 và ngược lại; unwind LIFO; `s1-s11`, signal mask và `sp` của main được bảo toàn |

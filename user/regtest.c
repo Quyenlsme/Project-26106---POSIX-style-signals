@@ -1,5 +1,5 @@
 
-// user/regtest.c — Bộ kiểm thử Signal Handler & Khôi phục Context cho xv6-riscv (REG-01..REG-33)
+// user/regtest.c — Bộ kiểm thử Signal Handler & Khôi phục Context cho xv6-riscv (REG-01..REG-41)
 // Đề tài 26106 — POSIX-style signals trên xv6-riscv
 // Người viết: Trần Việt Hưng — Tuần 3 (Hoàn thiện HD-01..HD-10)
 
@@ -326,6 +326,337 @@ reg39_alrm_handler(int sig)
     if (alarm(REG39_PERIOD) < 0)
       reg39_error = 1;
   }
+}
+
+// REG-40: HD-17 - Alarm overrun khi SIGALRM handler dang chay.
+#define REG40_ROUNDS     10
+#define REG40_BUSY_TICKS 3
+
+static volatile int reg40_fired = 0;
+static volatile int reg40_depth = 0;
+static volatile int reg40_max_depth = 0;
+static volatile int reg40_error = 0;
+static volatile int reg40_handler_sp_set = 0;
+static volatile uint64 reg40_handler_sp = 0;
+
+static void
+reg40_busy_ticks(int ticks)
+{
+  int start = uptime();
+  while (uptime() - start < ticks) {
+    // Moi lan uptime() tao mot diem tro ve user mode.
+  }
+}
+
+void
+reg40_alrm_handler(int sig)
+{
+  uint64 current_sp;
+  unsigned int current_mask = 0;
+
+  if (sig != SIGALRM)
+    reg40_error = 1;
+
+  reg40_depth++;
+  if (reg40_depth > reg40_max_depth)
+    reg40_max_depth = reg40_depth;
+  if (reg40_depth > 1)
+    reg40_error = 1;
+
+  asm volatile("mv %0, sp" : "=r"(current_sp));
+  if (!reg40_handler_sp_set) {
+    reg40_handler_sp = current_sp;
+    reg40_handler_sp_set = 1;
+  } else if (reg40_handler_sp != current_sp) {
+    reg40_error = 1;
+  }
+
+  if (sigprocmask(SIG_BLOCK, 0, &current_mask) < 0 ||
+      !(current_mask & (1U << SIGALRM))) {
+    // SIGALRM phai tu dong bi block trong handler cua chinh no.
+    reg40_error = 1;
+  }
+
+  reg40_fired++;
+
+  // Re-arm ngay dau handler. Alarm moi se het han trong luc handler
+  // dang chay, nhung SIGALRM bi tu block nen chi duoc giu pending.
+  if (reg40_fired < REG40_ROUNDS) {
+    if (alarm(1) < 0)
+      reg40_error = 1;
+  }
+
+  // Chu dong giu handler chay lau hon chu ky alarm.
+  reg40_busy_ticks(REG40_BUSY_TICKS);
+
+  reg40_depth--;
+}
+
+// REG-41: HD-18 - SIGALRM re-arm xen ke SIGUSR1 va nested LIFO.
+#define REG41_ROUNDS        20
+#define REG41_BUSY_TICKS    3
+#define REG41_TIMEOUT_TICKS 300
+#define REG41_CHILD_SENDS   1000
+
+__asm__(".text\n"
+        ".align 2\n"
+        ".globl reg41_register_probe\n"
+        ".type reg41_register_probe, @function\n"
+        "reg41_register_probe:\n"
+
+        // Tao stack frame 160 bytes, giu alignment 16 bytes.
+        "addi sp, sp, -160\n"
+
+        // Luu cac thanh ghi callee-saved ban dau.
+        "sd s1, 0(sp)\n"
+        "sd s2, 8(sp)\n"
+        "sd s3, 16(sp)\n"
+        "sd s4, 24(sp)\n"
+        "sd s5, 32(sp)\n"
+        "sd s6, 40(sp)\n"
+        "sd s7, 48(sp)\n"
+        "sd s8, 56(sp)\n"
+        "sd s9, 64(sp)\n"
+        "sd s10, 72(sp)\n"
+        "sd s11, 80(sp)\n"
+        "sd ra, 88(sp)\n"
+
+        // Luu cac tham so dau vao.
+        "sd a0, 96(sp)\n"
+        "sd a1, 104(sp)\n"
+        "sd a2, 112(sp)\n"
+        "sd a3, 120(sp)\n"
+        "sd a4, 128(sp)\n"
+        "sw zero, 144(sp)\n"
+
+        // Nap gia tri kiem thu vao s1-s11.
+        "li s1, 0x401\n"
+        "li s2, 0x402\n"
+        "li s3, 0x403\n"
+        "li s4, 0x404\n"
+        "li s5, 0x405\n"
+        "li s6, 0x406\n"
+        "li s7, 0x407\n"
+        "li s8, 0x408\n"
+        "li s9, 0x409\n"
+        "li s10, 0x40a\n"
+        "li s11, 0x40b\n"
+
+        // Mo mask: sigprocmask(SIG_SETMASK, runmask, 0).
+        "li a0, 2\n"
+        "ld a1, 96(sp)\n"
+        "li a2, 0\n"
+        "call sigprocmask\n"
+        "bltz a0, .Lreg41_probe_fail\n"
+
+        // Bat dau dem timeout.
+        "call uptime\n"
+        "sd a0, 136(sp)\n"
+
+        // Cho du 20 SIGALRM hoac timeout 300 ticks.
+        ".Lreg41_probe_loop:\n"
+        "ld t0, 104(sp)\n"
+        "lw t1, 0(t0)\n"
+        "li t2, 20\n"
+        "bge t1, t2, .Lreg41_probe_success\n"
+
+        "call uptime\n"
+        "ld t0, 136(sp)\n"
+        "sub t1, a0, t0\n"
+        "li t2, 300\n"
+        "bge t1, t2, .Lreg41_probe_fail\n"
+        "j .Lreg41_probe_loop\n"
+
+        ".Lreg41_probe_success:\n"
+        "li t0, 1\n"
+        "sw t0, 144(sp)\n"
+        "j .Lreg41_probe_block\n"
+
+        ".Lreg41_probe_fail:\n"
+        "sw zero, 144(sp)\n"
+
+        // Block ca SIGUSR1 va SIGALRM, dong thoi doc mask cu.
+        ".Lreg41_probe_block:\n"
+        "li a0, 0\n"
+        "ld a1, 112(sp)\n"
+        "ld a2, 120(sp)\n"
+        "call sigprocmask\n"
+        "bgez a0, .Lreg41_probe_save\n"
+        "sw zero, 144(sp)\n"
+
+        // Ghi cac thanh ghi vua duoc kiem tra ra bo nho.
+        ".Lreg41_probe_save:\n"
+        "ld t0, 128(sp)\n"
+        "sd s1, 0(t0)\n"
+        "sd s2, 8(t0)\n"
+        "sd s3, 16(t0)\n"
+        "sd s4, 24(t0)\n"
+        "sd s5, 32(t0)\n"
+        "sd s6, 40(t0)\n"
+        "sd s7, 48(t0)\n"
+        "sd s8, 56(t0)\n"
+        "sd s9, 64(t0)\n"
+        "sd s10, 72(t0)\n"
+        "sd s11, 80(t0)\n"
+
+        // Tra ket qua trong a0.
+        "lw a0, 144(sp)\n"
+
+        // Khoi phuc thanh ghi cua ham goi.
+        "ld ra, 88(sp)\n"
+        "ld s1, 0(sp)\n"
+        "ld s2, 8(sp)\n"
+        "ld s3, 16(sp)\n"
+        "ld s4, 24(sp)\n"
+        "ld s5, 32(sp)\n"
+        "ld s6, 40(sp)\n"
+        "ld s7, 48(sp)\n"
+        "ld s8, 56(sp)\n"
+        "ld s9, 64(sp)\n"
+        "ld s10, 72(sp)\n"
+        "ld s11, 80(sp)\n"
+        "addi sp, sp, 160\n"
+        "ret\n"
+
+        ".size reg41_register_probe, .-reg41_register_probe\n");
+
+extern int reg41_register_probe(sigset_t *, volatile int *, sigset_t *,
+                                sigset_t *, uint64 *);
+
+static volatile int reg41_stage = 0;
+static volatile int reg41_alarm_fired = 0;
+static volatile int reg41_usr1_fired = 0;
+static volatile int reg41_depth = 0;
+static volatile int reg41_max_depth = 0;
+static volatile int reg41_stack[4];
+static volatile int reg41_error = 0;
+static volatile int reg41_mask_error = 0;
+static volatile int reg41_alarm_nested_in_usr1 = 0;
+static volatile int reg41_usr1_nested_in_alarm = 0;
+
+static void
+reg41_busy_ticks(int ticks)
+{
+  int start = uptime();
+  while (uptime() - start < ticks) {
+    // Cho timer va tien trinh con co co hoi phat signal.
+  }
+}
+
+static void
+reg41_enter(int sig)
+{
+  int depth = reg41_depth;
+
+  if (depth < 0 || depth >= 4) {
+    reg41_error = 1;
+    return;
+  }
+
+  reg41_stack[depth] = sig;
+  reg41_depth = depth + 1;
+  if (reg41_depth > reg41_max_depth)
+    reg41_max_depth = reg41_depth;
+}
+
+static void
+reg41_leave(int sig)
+{
+  int depth = reg41_depth;
+
+  if (depth <= 0 || reg41_stack[depth - 1] != sig) {
+    // Moi handler phai unwind dung thu tu Last In, First Out.
+    reg41_error = 1;
+    return;
+  }
+
+  reg41_depth = depth - 1;
+}
+
+void
+reg41_usr1_handler(int sig)
+{
+  unsigned int current_mask = 0;
+  unsigned int alarm_set = (1U << SIGALRM);
+  int depth;
+
+  if (sig != SIGUSR1)
+    reg41_error = 1;
+
+  reg41_enter(SIGUSR1);
+  depth = reg41_depth;
+  reg41_usr1_fired++;
+
+  if (sigprocmask(SIG_BLOCK, 0, &current_mask) < 0 ||
+      !(current_mask & (1U << SIGUSR1)) || !(current_mask & (1U << SIGALRM))) {
+    // sa_mask cua SIGUSR1 phai block SIGALRM khi moi vao handler.
+    reg41_mask_error = 1;
+  }
+
+  if (reg41_stage == 1 && depth == 1 && !reg41_alarm_nested_in_usr1) {
+    // Pha 1: mo chan SIGALRM trong SIGUSR1 handler. Alarm da duoc
+    // dat truoc do va se het han trong luc handler nay dang chay.
+    if (sigprocmask(SIG_UNBLOCK, &alarm_set, 0) < 0)
+      reg41_error = 1;
+
+    reg41_busy_ticks(REG41_BUSY_TICKS);
+
+    if (sigprocmask(SIG_BLOCK, &alarm_set, 0) < 0)
+      reg41_error = 1;
+  } else if (reg41_stage == 2 && depth == 2 && reg41_stack[0] == SIGALRM) {
+    // Pha 2: SIGUSR1 dang duoc long ben trong SIGALRM handler.
+    reg41_usr1_nested_in_alarm = 1;
+  }
+
+  reg41_leave(SIGUSR1);
+}
+
+void
+reg41_alrm_handler(int sig)
+{
+  unsigned int current_mask = 0;
+  unsigned int usr1_set = (1U << SIGUSR1);
+  int depth;
+
+  if (sig != SIGALRM)
+    reg41_error = 1;
+
+  reg41_enter(SIGALRM);
+  depth = reg41_depth;
+  reg41_alarm_fired++;
+
+  if (sigprocmask(SIG_BLOCK, 0, &current_mask) < 0 ||
+      !(current_mask & (1U << SIGALRM)) || !(current_mask & (1U << SIGUSR1))) {
+    // sa_mask cua SIGALRM phai block SIGUSR1 khi moi vao handler.
+    reg41_mask_error = 1;
+  }
+
+  if (reg41_stage == 1 && depth == 2 && reg41_stack[0] == SIGUSR1) {
+    // Pha 1: SIGALRM duoc long ben trong SIGUSR1 handler.
+    reg41_alarm_nested_in_usr1 = 1;
+  }
+
+  if (reg41_stage == 2) {
+    // Re-arm 20 lan; khong tao alarm thu 21.
+    if (reg41_alarm_fired < REG41_ROUNDS) {
+      if (alarm(2) < 0)
+        reg41_error = 1;
+    }
+
+    if (depth == 1) {
+      // Pha 2: mo chan SIGUSR1 trong SIGALRM handler. Tien trinh
+      // con lien tuc gui SIGUSR1, do do handler nay co the nested.
+      if (sigprocmask(SIG_UNBLOCK, &usr1_set, 0) < 0)
+        reg41_error = 1;
+
+      reg41_busy_ticks(REG41_BUSY_TICKS);
+
+      if (sigprocmask(SIG_BLOCK, &usr1_set, 0) < 0)
+        reg41_error = 1;
+    }
+  }
+
+  reg41_leave(SIGALRM);
 }
 
 int
@@ -2118,6 +2449,284 @@ main(int argc, char *argv[])
       printf("iterations=%ld, sum=%ld, expected_sum=%ld\n", out_regs[11],
              out_regs[12], expected_sum);
 
+      exit(1);
+    }
+  }
+
+  // REG-40: HD-17 - Alarm het han trong luc SIGALRM handler dang chay.
+  {
+    struct sigaction act, oldact;
+    sigset_t set, oldmask, runmask;
+    uint64 main_sp_before, main_sp_after;
+    int start;
+    int pass = 1;
+
+    set = (1U << SIGALRM);
+
+    if (sigprocmask(SIG_BLOCK, &set, &oldmask) < 0) {
+      printf("REG-40 FAIL: cannot block SIGALRM\n");
+      exit(1);
+    }
+
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = reg40_alrm_handler;
+    act.sa_mask = 0;
+    act.sa_flags = 0;
+    act.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGALRM, &act, &oldact) < 0) {
+      printf("REG-40 FAIL: sigaction\n");
+      sigprocmask(SIG_SETMASK, &oldmask, 0);
+      exit(1);
+    }
+
+    reg40_fired = 0;
+    reg40_depth = 0;
+    reg40_max_depth = 0;
+    reg40_error = 0;
+    reg40_handler_sp_set = 0;
+    reg40_handler_sp = 0;
+
+    runmask = oldmask & ~set;
+    alarm(0);
+
+    asm volatile("mv %0, sp" : "=r"(main_sp_before));
+
+    // Dat alarm khi SIGALRM dang bi block, sau do moi mo chan.
+    if (alarm(1) < 0 || sigprocmask(SIG_SETMASK, &runmask, 0) < 0) {
+      printf("REG-40 FAIL: cannot start alarm\n");
+      alarm(0);
+      sigaction(SIGALRM, &oldact, 0);
+      sigprocmask(SIG_SETMASK, &oldmask, 0);
+      exit(1);
+    }
+
+    start = uptime();
+    while (reg40_fired < REG40_ROUNDS && uptime() - start < 100) {
+      // Handler se re-arm alarm(1), roi chay lau hon 1 tick.
+    }
+
+    // Dung va block SIGALRM truoc khi khoi phuc action.
+    if (sigprocmask(SIG_BLOCK, &set, 0) < 0)
+      pass = 0;
+    alarm(0);
+
+    asm volatile("mv %0, sp" : "=r"(main_sp_after));
+
+    if (reg40_fired != REG40_ROUNDS || reg40_error || reg40_depth != 0 ||
+        reg40_max_depth != 1 || !reg40_handler_sp_set ||
+        main_sp_before != main_sp_after)
+      pass = 0;
+
+    if (sigaction(SIGALRM, &oldact, 0) < 0)
+      pass = 0;
+    if (sigprocmask(SIG_SETMASK, &oldmask, 0) < 0)
+      pass = 0;
+
+    if (pass) {
+      printf(
+        "REG-40 PASS: 10 alarm overruns stayed pending; no recursive SIGALRM, stack restored (HD-17)\n");
+    } else {
+      printf(
+        "REG-40 FAIL: fired=%d, depth=%d, max_depth=%d, error=%d, handler_sp_set=%d, main_sp=%d\n",
+        reg40_fired, reg40_depth, reg40_max_depth, reg40_error,
+        reg40_handler_sp_set, main_sp_before == main_sp_after);
+      exit(1);
+    }
+  }
+
+  // REG-41: HD-18 - SIGALRM re-arm xen ke SIGUSR1, nested theo LIFO.
+  {
+    struct sigaction act_usr1, act_alrm, old_usr1, old_alrm;
+    struct sigaction ignore_act;
+    sigset_t pair, usr1_set, alrm_set, oldmask, runmask;
+    sigset_t current_mask = 0;
+    uint64 main_sp_before, main_sp_after;
+    uint64 reg41_saved[11];
+    int regs_pass = 1;
+    int pass = 1;
+    int start;
+    int child = -1;
+    int child_status = 0;
+    int start_pipe[2] = {-1, -1};
+    int parent_pid = getpid();
+    char token = 'S';
+
+    asm volatile("mv %0, sp" : "=r"(main_sp_before));
+    main_sp_after = main_sp_before;
+
+    usr1_set = (1U << SIGUSR1);
+    alrm_set = (1U << SIGALRM);
+    pair = usr1_set | alrm_set;
+
+    if (sigprocmask(SIG_BLOCK, &pair, &oldmask) < 0) {
+      printf("REG-41 FAIL: cannot block SIGUSR1/SIGALRM\n");
+      exit(1);
+    }
+
+    memset(&act_usr1, 0, sizeof(act_usr1));
+    act_usr1.sa_handler = reg41_usr1_handler;
+    act_usr1.sa_mask = alrm_set;
+    act_usr1.sa_flags = 0;
+    act_usr1.sa_restorer = sigrestorer;
+
+    memset(&act_alrm, 0, sizeof(act_alrm));
+    act_alrm.sa_handler = reg41_alrm_handler;
+    act_alrm.sa_mask = usr1_set;
+    act_alrm.sa_flags = 0;
+    act_alrm.sa_restorer = sigrestorer;
+
+    if (sigaction(SIGUSR1, &act_usr1, &old_usr1) < 0 ||
+        sigaction(SIGALRM, &act_alrm, &old_alrm) < 0) {
+      printf("REG-41 FAIL: sigaction\n");
+      sigprocmask(SIG_SETMASK, &oldmask, 0);
+      exit(1);
+    }
+
+    runmask = oldmask & ~pair;
+    reg41_error = 0;
+    reg41_mask_error = 0;
+    reg41_depth = 0;
+    reg41_max_depth = 0;
+    reg41_alarm_fired = 0;
+    reg41_usr1_fired = 0;
+    reg41_alarm_nested_in_usr1 = 0;
+    reg41_usr1_nested_in_alarm = 0;
+
+    // Pha 1: SIGUSR1 la handler ngoai; SIGALRM het han va nested
+    // sau khi SIGUSR1 tam thoi mo chan no.
+    reg41_stage = 1;
+    alarm(0);
+    if (alarm(1) < 0 || kill(parent_pid, SIGUSR1) < 0 ||
+        sigprocmask(SIG_SETMASK, &runmask, 0) < 0) {
+      printf("REG-41 FAIL: cannot start phase 1\n");
+      alarm(0);
+      sigaction(SIGUSR1, &old_usr1, 0);
+      sigaction(SIGALRM, &old_alrm, 0);
+      sigprocmask(SIG_SETMASK, &oldmask, 0);
+      exit(1);
+    }
+
+    start = uptime();
+    while (!reg41_alarm_nested_in_usr1 && uptime() - start < 30) {
+    }
+    if (!reg41_alarm_nested_in_usr1)
+      pass = 0;
+
+    // Block ca hai signal truoc khi chuyen sang pha 2.
+    if (sigprocmask(SIG_BLOCK, &pair, 0) < 0)
+      pass = 0;
+    alarm(0);
+
+    // Tien trinh con cho token, sau do gui SIGUSR1 lien tuc.
+    if (pipe(start_pipe) < 0) {
+      printf("REG-41 FAIL: pipe\n");
+      pass = 0;
+    } else {
+      child = fork();
+      if (child < 0) {
+        printf("REG-41 FAIL: fork\n");
+        pass = 0;
+      } else if (child == 0) {
+        close(start_pipe[1]);
+        if (read(start_pipe[0], &token, 1) != 1)
+          exit(2);
+        close(start_pipe[0]);
+
+        for (int i = 0; i < REG41_CHILD_SENDS; i++) {
+          kill(parent_pid, SIGUSR1);
+          pause(1);
+        }
+        exit(0);
+      }
+    }
+
+    if (child > 0) {
+      close(start_pipe[0]);
+      start_pipe[0] = -1;
+
+      reg41_stage = 2;
+      reg41_depth = 0;
+      reg41_max_depth = 0;
+      reg41_alarm_fired = 0;
+      reg41_usr1_fired = 0;
+      reg41_usr1_nested_in_alarm = 0;
+
+      if (alarm(2) < 0 || write(start_pipe[1], &token, 1) != 1)
+        pass = 0;
+      close(start_pipe[1]);
+      start_pipe[1] = -1;
+
+      // Ham assembly tu nap register, mo mask, cho signal,
+      // block lai signal va luu s1-s11 truoc khi tra ve C.
+      if (reg41_register_probe(&runmask, &reg41_alarm_fired, &pair,
+                               &current_mask, reg41_saved) != 1)
+        pass = 0;
+
+      if (reg41_alarm_fired != REG41_ROUNDS)
+        pass = 0;
+
+      // current_mask la mask truoc khi ham probe block hai signal.
+      if (current_mask != runmask)
+        pass = 0;
+
+      asm volatile("mv %0, sp" : "=r"(main_sp_after));
+
+      if (reg41_saved[0] != 0x401 || reg41_saved[1] != 0x402 ||
+          reg41_saved[2] != 0x403 || reg41_saved[3] != 0x404 ||
+          reg41_saved[4] != 0x405 || reg41_saved[5] != 0x406 ||
+          reg41_saved[6] != 0x407 || reg41_saved[7] != 0x408 ||
+          reg41_saved[8] != 0x409 || reg41_saved[9] != 0x40a ||
+          reg41_saved[10] != 0x40b)
+        regs_pass = 0;
+
+      // Dung child de khong phat them signal trong luc cleanup.
+      kill(child, SIGKILL);
+      if (wait(&child_status) != child)
+        pass = 0;
+      child = -1;
+    } else if (child == -1) {
+      if (start_pipe[0] >= 0)
+        close(start_pipe[0]);
+      if (start_pipe[1] >= 0)
+        close(start_pipe[1]);
+    }
+
+    if (!reg41_usr1_nested_in_alarm || reg41_error || reg41_mask_error ||
+        reg41_depth != 0 || reg41_max_depth != 2 ||
+        main_sp_before != main_sp_after || !regs_pass)
+      pass = 0;
+
+    // Don dep pending signal: dat SIG_IGN trong luc block, mo chan de
+    // tieu thu pending, sau do moi khoi phuc action/mask cu.
+    memset(&ignore_act, 0, sizeof(ignore_act));
+    ignore_act.sa_handler = SIG_IGN;
+    if (sigaction(SIGUSR1, &ignore_act, 0) < 0 ||
+        sigaction(SIGALRM, &ignore_act, 0) < 0)
+      pass = 0;
+    alarm(0);
+    if (sigprocmask(SIG_SETMASK, &runmask, 0) < 0)
+      pass = 0;
+    if (sigprocmask(SIG_BLOCK, &pair, 0) < 0)
+      pass = 0;
+    if (sigaction(SIGUSR1, &old_usr1, 0) < 0 ||
+        sigaction(SIGALRM, &old_alrm, 0) < 0)
+      pass = 0;
+    if (sigprocmask(SIG_SETMASK, &oldmask, 0) < 0)
+      pass = 0;
+
+    if (pass) {
+      printf(
+        "REG-41 PASS: 20 SIGALRM, cross-nested SIGUSR1, LIFO and s1-s11/mask preserved (HD-18)\n");
+    } else {
+      printf(
+        "REG-41 FAIL: alarm=%d, usr1=%d, depth=%d, max_depth=%d, error=%d, mask_error=%d\n",
+        reg41_alarm_fired, reg41_usr1_fired, reg41_depth, reg41_max_depth,
+        reg41_error, reg41_mask_error);
+      printf(
+        "nested: SIGALRM-in-SIGUSR1=%d, SIGUSR1-in-SIGALRM=%d; sp=%d; regs=%d\n",
+        reg41_alarm_nested_in_usr1, reg41_usr1_nested_in_alarm,
+        main_sp_before == main_sp_after, regs_pass);
       exit(1);
     }
   }
