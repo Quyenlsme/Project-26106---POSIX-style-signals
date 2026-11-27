@@ -1,0 +1,59 @@
+qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel -m 128M -smp 4 -nographic -global virtio-mmio.force-legacy=false -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 1 starting
+hart 2 starting
+hart 3 starting
+init: starting sh
+$ regtest
+
+===== SIGNAL REGISTER TEST =====
+REG-01 PASS: Signal handler was called
+REG-02 PASS: s1-s11 preserved after signal
+REG-03 PASS: stack pointer restored after sigreturn
+REG-04 PASS: blocked signal delivered after unblock
+REG-05 PASS: signal mask restored after handler
+REG-06 PASS: nested signal handler executed correctly
+REG-07 PASS: SIG_IGN ignored the signal
+REG-08 PASS: SIG_DFL terminated child process
+REG-09 PASS: SIGKILL cannot be blocked
+REG-10 PASS: sigprocmask handles NULL arguments
+REG-11 PASS: sigaction filters unsupported signals
+REG-12 PASS: sigaction rejects invalid signals
+REG-13 PASS: sigaction rejects unsupported flags
+REG-14 PASS: sigaction rejects handler without restorer
+REG-15 PASS: sigaction returns old action
+REG-16 PASS: sigaction rejects invalid act address
+REG-17 PASS: sigaction rejects invalid oldact address
+REG-18 PASS: sigprocmask rejects invalid how
+REG-19 PASS: NULL set does not change signal mask
+REG-20 PASS: SIGKILL cannot be blocked using SIG_SETMASK
+REG-21 PASS: SIG_UNBLOCK only unblocks requested signal
+REG-22 PASS: sigaction updates action and returns old action
+REG-23 PASS: SIG_IGN does not require sa_restorer
+Before unblock: handler_called=0
+Blocked mask before unblock: 5120
+After unblock: handler_called=2
+After getpid: handler_called=2
+Expected handler_called=2
+REG-24 PASS: Multiple pending signals were delivered
+REG-25 PASS: Child inherited signal handler after fork
+REG-26 PASS: Child signal action change did not affect parent
+REG-27 PASS: Pending signal was not inherited after fork
+REG-28 PASS: Signal actions and mask handled correctly after exec
+REG-29 PASS: a0 preserved across sigreturn (HD-04)
+REG-30 PASS: Recursive re-entry prevented, pending delivered after sigreturn (HD-08)
+REG-31 PASS: Bad stack frame killed process safely without panic (HD-09)
+REG-32 PASS: Stack pointer is 16-byte aligned (sp=0x9C50) (HD-10)
+REG-33 PASS: Caller-saved registers t0-t6, a1-a7 preserved across sigreturn (HD-03)
+REG-34 PASS: Three-level nested handlers unwind in LIFO order and restore signal mask (HD-11)
+REG-35 PASS: Insufficient user stack for signal frame terminates child with status -1 (HD-12)
+REG-36 PASS: Burst signals delivered exactly once in increasing order and s1-s11 preserved (HD-13)
+REG-37 PASS: sa_mask deferred SIGUSR2 until SIGUSR1 handler returned (HD-14)
+REG-38 PASS: handler mask correct and original mask restored (HD-15)
+REG-39 PASS: SIGALRM re-armed 5 times, computation and s1-s11 preserved (HD-16)
+REG-40 PASS: 10 alarm overruns stayed pending; no recursive SIGALRM, stack restored (HD-17)
+REG-41 PASS: 20 SIGALRM, cross-nested SIGUSR1, LIFO and s1-s11/mask preserved (HD-18)
+===== TEST COMPLETED =====
+$ QEMU: Terminated
