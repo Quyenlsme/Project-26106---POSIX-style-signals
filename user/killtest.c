@@ -782,6 +782,105 @@ test_alarm_wakeup(void)
         "SIG_DFL: SIGALRM ket thuc con voi status -1");
 }
 
+// ---------------------------------------------------------------------------
+// Test 19 (DL-20): stress alarm + kill dong thoi tren nhieu CPU.
+// 4 tien trinh "worker" moi tien trinh tu re-arm alarm(1) trong handler cho du
+// 50 lan SIGALRM; dong thoi 2 tien trinh "killer" lien tuc gui SIGUSR1 vao ca 4.
+// Signal tu timer (CPU 0) va tu kill() (CPU khac) cung danh vao pending_signals
+// duoi p->lock. PASS khi: moi worker dem du 50 SIGALRM (khong mat alarm nao),
+// nhan SIGUSR1 it nhat 1 lan, va xong truoc gioi han 500 tick (khong treo).
+// ---------------------------------------------------------------------------
+#define ST_WORKERS 4
+#define ST_KILLERS 2
+#define ST_ALARMS  50
+#define ST_LIMIT   500
+
+static volatile int st_alrm = 0;
+static volatile int st_usr1 = 0;
+
+static void
+st_on_alrm(int sig)
+{
+  st_alrm++;
+  if (st_alrm < ST_ALARMS)
+    alarm(1); // re-arm ngay trong handler
+}
+
+static void
+st_on_usr1(int sig)
+{
+  st_usr1++;
+}
+
+static int
+stress_worker(void)
+{
+  unsigned int zero = 0;
+  sigprocmask(SIG_SETMASK, &zero, 0);
+  st_alrm = 0;
+  st_usr1 = 0;
+  set_handler(SIGUSR1, st_on_usr1);
+  set_handler(SIGALRM, st_on_alrm);
+
+  int t0 = uptime();
+  alarm(1);
+  // pause() bi ngat boi SIGALRM hoac SIGUSR1 deu tra -1; vong lap kiem tra lai.
+  while (st_alrm < ST_ALARMS && uptime() - t0 < ST_LIMIT)
+    pause(5);
+
+  if (st_alrm != ST_ALARMS)
+    return 1; // mat alarm hoac qua gioi han thoi gian
+  if (st_usr1 < 1)
+    return 2; // khong nhan duoc SIGUSR1 nao
+  return 10;
+}
+
+static void
+test_alarm_kill_stress(void)
+{
+  printf(
+    "Test 19 (DL-20): stress alarm + kill dong thoi (4 worker, 2 killer)\n");
+  int workers[ST_WORKERS], killers[ST_KILLERS];
+
+  for (int i = 0; i < ST_WORKERS; i++) {
+    workers[i] = fork();
+    if (workers[i] == 0)
+      exit(stress_worker());
+  }
+  for (int i = 0; i < ST_KILLERS; i++) {
+    killers[i] = fork();
+    if (killers[i] == 0) {
+      for (;;) {
+        for (int j = 0; j < 20; j++)
+          for (int w = 0; w < ST_WORKERS; w++)
+            kill(workers[w], SIGUSR1);
+        pause(1);
+      }
+    }
+  }
+
+  // Killer khong bao gio tu thoat, nen ST_WORKERS lan wait() dau tien la worker.
+  int ok = 0, lost = 0, no_usr1 = 0;
+  for (int i = 0; i < ST_WORKERS; i++) {
+    int status = 0;
+    wait(&status);
+    if (status == 10)
+      ok++;
+    else if (status == 2)
+      no_usr1++;
+    else
+      lost++;
+  }
+  for (int i = 0; i < ST_KILLERS; i++)
+    kill(killers[i], SIGKILL);
+  for (int i = 0; i < ST_KILLERS; i++)
+    wait(0);
+
+  check(lost == 0, "moi worker dem du 50 SIGALRM trong gioi han thoi gian");
+  check(no_usr1 == 0, "moi worker nhan duoc SIGUSR1 tu killer");
+  check(ok == ST_WORKERS, "ca 4 worker ket thuc dung, khong treo");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -812,6 +911,7 @@ main(int argc, char *argv[])
   test_unsupported_signal();
   test_default_actions();
   test_alarm_wakeup();
+  test_alarm_kill_stress();
 
   printf("=== Ket qua: %d PASS, %d FAIL ===\n", passed, failed);
   if (failed == 0)
